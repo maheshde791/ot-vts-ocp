@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vts-server
+  namespace: lre-vts
+  labels:
+    app: vts-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vts-server
+  template:
+    metadata:
+      labels:
+        app: vts-server
+    spec:
+      containers:
+      - name: vts-container
+        image: performancetesting/opentext_vts_linux_ubuntu:26.3
+        imagePullPolicy: IfNotPresent
+        workingDir: /opt/OT/OT_VTS/web
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          # 1. Start Nginx reverse proxy in background
+          nginx          
+          # 2. Start the instance supervisor daemon in the background
+          ./api_daemon </dev/null &
+          # 3. Hand over execution to apiserver in foreground (manages nginx)
+          exec ./apiserver
+        ports:
+        - name: admin-web
+          containerPort: 8080
+        - name: admin-ssl
+          containerPort: 8443
+        - name: internal-api
+          containerPort: 4000
+        - name: data-port
+          containerPort: 8888
+        volumeMounts:
+        - name: config-mount
+          mountPath: /opt/OT/OT_VTS/web/configure.json
+          subPath: configure.json
+      volumes:
+      - name: config-mount
+        configMap:
+          name: vts-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vts-service
+  namespace: lre-vts
+  labels:
+    app: vts-server
+spec:
+  type: ClusterIP
+  selector:
+    app: vts-server
+  ports:
+  - name: admin-web
+    port: 8080
+    targetPort: 8080
+  - name: admin-ssl
+    port: 8443
+    targetPort: 8443
+  - name: internal-api
+    port: 4000
+    targetPort: 4000
+  - name: data-port
+    port: 8888
+    targetPort: 8888
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: vts-admin-route
+  namespace: lre-vts
+spec:
+  host: vts-admin-route-lre-vts.apps-crc.testing
+  to:
+    kind: Service
+    name: vts-service
+  port:
+    targetPort: admin-web
+  tls:
+    termination: edge
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: vts-data-route
+  namespace: lre-vts
+spec:
+  host: vts-data-route-lre-vts.apps-crc.testing
+  to:
+    kind: Service
+    name: vts-service
+  port:
+    targetPort: data-port
+  tls:
+    termination: edge
