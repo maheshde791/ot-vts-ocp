@@ -21,7 +21,7 @@ data:
         "users": [
           {
             "user": "vtsadmin",
-            "password": "<Set your password here>",
+            "password": "<<PASSWORD>>",
             "display": "VTS Administrator"
           }
         ],
