@@ -24,22 +24,51 @@ spec:
         image: performancetesting/opentext_vts_linux_ubuntu:26.3
         imagePullPolicy: IfNotPresent
         workingDir: /opt/OT/OT_VTS/web
+        # Define compute resources to eliminate noisy-neighbor issues
+        resources:
+          requests:
+            cpu: "500m"        # 0.5 vCPU guaranteed
+            memory: "1Gi"       # 1 GiB RAM guaranteed
+          limits:
+            cpu: "1000m"       # Max 1 vCPU ceiling
+            memory: "2Gi"       # Max 2 GiB RAM ceiling        
         command: ["/bin/bash", "-c"]
         args:
         - |
-          # 1. Seed instances.json with [] if missing or empty on the PVC
-          if [ ! -s /var/lib/OT/OT_VTS/db/data/instances.json ]; then
-            echo "[]" > /var/lib/OT/OT_VTS/db/data/instances.json 2>/dev/null || true
+          # 1. Ensure instances.json exists cleanly on the PVC
+          DATA_FILE="/var/lib/OT/OT_VTS/db/data/instances.json"
+          if [ ! -f "$DATA_FILE" ] || [ ! -s "$DATA_FILE" ] || grep -q "null" "$DATA_FILE"; then
+            echo "[]" > "$DATA_FILE" 2>/dev/null || true
+            chmod 664 "$DATA_FILE" 2>/dev/null || true
           fi
 
-          # 2. Launch reverse proxy
+          # 2. Configure automatic RDB snapshots every 60s (only if data changed)
+          sed -i '/^save /d' /opt/OT/OT_VTS/web/redis.conf 2>/dev/null || true
+          echo "save 60 1" >> /opt/OT/OT_VTS/web/redis.conf 2>/dev/null || true
+
+          # 3. Start reverse proxy
           nginx
 
-          # 3. Launch supervisor daemon in background
+          # 4. Start supervisor daemon in background (manages apiserver and valkey-server)
           ./api_daemon </dev/null &
 
-          # 4. Start apiserver
-          exec ./apiserver
+          # 5. Keep container alive and track processes
+          wait -n
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /bin/bash
+              - -c
+              - |
+                # Dynamically discover every running Valkey instance port and save data to PVC
+                for pid in $(pgrep valkey-server 2>/dev/null); do
+                  PORT=$(cat /proc/$pid/cmdline 2>/dev/null | tr '\0' ' ' | grep -oP '127\.0\.0\.1:\K\d+')
+                  if [ -n "$PORT" ]; then
+                    /opt/OT/OT_VTS/web/valkey-cli -p "$PORT" save 2>/dev/null || true
+                  fi
+                done
+                sync
         ports:
         - name: admin-api
           containerPort: 4000
