@@ -416,16 +416,13 @@ cd /home/mahesh/vts_ocp/load_test
 ### Verified Multi-Instance Benchmark Results (3,000 Parallel Requests):
 
 ```text
-======================================================================================
              VTS MULTI-INSTANCE LOAD TEST & BENCHMARK REPORT (PARALLEL)         
-======================================================================================
  Test Duration          : 9.56 seconds
  Target Instances       : Port 2000, Port 2001, Port 8888 (Simultaneous)
  Total Requests Run     : 3000 (1500 Reads, 1500 Writes)
  Successful (HTTP 200)  : 3000 (100.0%)
  Failed / Errors        : 0 (0.0%)
  Overall Throughput     : 313.81 Requests/Second (RPS)
-======================================================================================
  INSTANCE       | OP     | COUNT  | MIN    | AVG    | p50    | p90    | p95    | p99    | MAX   
 --------------------------------------------------------------------------------------
  Port 2000      | READ   | 500    | 7.5    | 40.4   | 39.1   | 56.1   | 60.4   | 73.5   | 85.2  
@@ -441,12 +438,9 @@ cd /home/mahesh/vts_ocp/load_test
  Port 8888      | SUBTOT | 1000   | 9.7    | 40.6   | 40.1   | 56.0   | 60.6   | 72.0   | 97.3  
 --------------------------------------------------------------------------------------
  ALL COMBINED   | TOTAL  | 3000   | 7.5    | 40.9   | 40.0   | 56.4   | 61.5   | 73.8   | 97.3  
-======================================================================================
                      TARGET VM RESOURCE UTILIZATION                    
-======================================================================================
  CPU Utilization (%)    : Min: 1.5%  |  Average: 1.7%  |  Peak: 2.1%
  RAM Usage (MB)         : Min: 1410MB |  Average: 1411MB (9.0%) |  Peak: 1411MB (of 15731MB)
-======================================================================================
 ```
 
 ---
