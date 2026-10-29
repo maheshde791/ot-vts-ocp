@@ -10,7 +10,7 @@ data:
       "defaultDbName" : "Default",
       "adminPort": 4000,
       "defaultApiPort": 8888,
-      "defaultStart": false,
+      "defaultStart": true,
       "enableDiag": false,
       "autoRefreshGrid": true,
       "maxInstancesAllowed": 50,
@@ -21,7 +21,7 @@ data:
         "users": [
           {
             "user": "vtsadmin",
-            "password": "",
+            "password": "<<PASSWORD>>",
             "display": "VTS Administrator"
           }
         ],
