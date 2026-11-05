@@ -16,15 +16,34 @@
         "user": "maheshd",
         "password": "*****",
         "display": "Mahesh Deore"
+      },
+      {
+        "user": "vts_admin",
+        "password": "*****",
+        "display": "VTS Platform Admin"
+      },
+      {
+        "user": "vts_tester",
+        "password": "*****",
+        "display": "Performance Test User"
+      },
+      {
+        "user": "vts_viewer",
+        "password": "*****",
+        "display": "Read-Only Reporting Viewer"
       }
     ],
     "role": {
       "administrator": [
-        "maheshd"
+        "maheshd",
+        "vts_admin"
       ],
-      "user": []
+      "user": [
+        "vts_tester",
+        "vts_viewer"
+      ]
     },
-    "requireBasicAuthForAPI": false,
+    "requireBasicAuthForAPI": true,
     "domain": "",
     "domaincontroller": "",
     "ldapsCert": "",

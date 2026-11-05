@@ -429,15 +429,34 @@ Location on server: `F:\VTS26.1\web\configure.json`
         "user": "maheshd",
         "password": "*****",
         "display": "Mahesh Deore"
+      },
+      {
+        "user": "vts_admin",
+        "password": "*****",
+        "display": "VTS Platform Admin"
+      },
+      {
+        "user": "vts_tester",
+        "password": "*****",
+        "display": "Performance Test User"
+      },
+      {
+        "user": "vts_viewer",
+        "password": "*****",
+        "display": "Read-Only Reporting Viewer"
       }
     ],
     "role": {
       "administrator": [
-        "maheshd"
+        "maheshd",
+        "vts_admin"
       ],
-      "user": []
+      "user": [
+        "vts_tester",
+        "vts_viewer"
+      ]
     },
-    "requireBasicAuthForAPI": false,
+    "requireBasicAuthForAPI": true,
     "domain": "",
     "domaincontroller": "",
     "ldapsCert": "",
@@ -584,6 +603,72 @@ Write-Host "==========================================================" -Foregro
 
 ---
 
+### 7.4 API Authentication & Role-Based Access Control Script (`enable_vts_api_auth.ps1`)
+
+To address Enterprise Architecture and Security requirements for securing programmatic API endpoints, [`enable_vts_api_auth.ps1`](file:///home/mahesh/vts_ocp/native_server_Windows2025/enable_vts_api_auth.ps1) automates the configuration of:
+1. Enabling strict API authentication (`requireBasicAuthForAPI = true`).
+2. Creating dedicated accounts for administration (`maheshd`, `vts_admin`) and testing (`vts_tester`, `vts_viewer`).
+3. Enforcing Role-Based Access Control (RBAC):
+   * **`administrator`:** Full Web UI management and API read/write/update access.
+   * **`user`:** Read-only API query access (writes blocked with `HTTP 403 Forbidden`).
+4. Graceful VTS Windows service restart.
+
+#### Execute on Windows Server 2025 (PowerShell as Administrator):
+```powershell
+powershell -ExecutionPolicy Bypass -Command "irm http://192.168.122.1:8000/enable_vts_api_auth.ps1 | iex"
+```
+
+#### Script Code: `enable_vts_api_auth.ps1`
+```powershell
+# ==============================================================================
+# enable_vts_api_auth.ps1 - Enable API Authentication & Configure User Roles
+# ==============================================================================
+$configPath = "F:\VTS26.1\web\configure.json"
+
+# 1. Backup existing configure.json
+$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+Copy-Item $configPath "$configPath.pre_auth_$timestamp.bak" -Force
+
+# 2. Update configure.json
+$json = Get-Content $configPath -Raw | ConvertFrom-Json
+$json.admin.requireBasicAuthForAPI = $true
+
+# Define desired users
+$targetUsers = @(
+    @{ user = "maheshd"; password = "*****"; display = "Mahesh Deore" },
+    @{ user = "vts_admin"; password = "*****"; display = "VTS Platform Admin" },
+    @{ user = "vts_tester"; password = "*****"; display = "Performance Test User" },
+    @{ user = "vts_viewer"; password = "*****"; display = "Read-Only Reporting Viewer" }
+)
+
+$existingUsers = @($json.admin.users)
+$userList = [System.Collections.Generic.List[PSObject]]::new()
+
+foreach ($tUser in $targetUsers) {
+    $existing = $existingUsers | Where-Object { $_.user -eq $tUser.user }
+    if ($existing) {
+        $userObj = [PSCustomObject]@{ user = $existing.user; password = $existing.password; display = $tUser.display }
+    } else {
+        $userObj = [PSCustomObject]@{ user = $tUser.user; password = $tUser.password; display = $tUser.display }
+    }
+    $userList.Add($userObj)
+}
+$json.admin.users = $userList
+
+# Set Roles
+$json.admin.role.administrator = @("maheshd", "vts_admin")
+$json.admin.role.user = @("vts_tester", "vts_viewer")
+
+$updatedJson = $json | ConvertTo-Json -Depth 15
+[System.IO.File]::WriteAllText($configPath, $updatedJson)
+
+# 3. Restart VTS Windows Service
+$vtsService = Get-Service | Where-Object { $_.DisplayName -like "*Virtual Table Server*" -or $_.Name -like "*VTS*" }
+if ($vtsService) { Restart-Service -Name $vtsService.Name -Force }
+```
+
+---
+
 ## 8. Multi-Instance Setup & Test Data Population
 
 ### Instances Configured
@@ -662,11 +747,110 @@ curl -k -s -X POST https://localvts.com:2001/client_api/get \
 
 ---
 
+### 4. Verify API Authentication & Role-Based Access Control (RBAC)
+
+With `"requireBasicAuthForAPI": true`, all instance ports enforce role-based access control:
+
+```bash
+# 1. Anonymous Write (Blocked - HTTP 400)
+curl -k -s -o /dev/null -w "%{http_code}\n" -X POST https://localvts.com:2000/client_api/add \
+  -H "Content-Type: application/json" -d '{"Customer_ID": "ANON_ID"}'
+# Output: 400
+
+# 2. User Role Write (vts_tester - Blocked by RBAC - HTTP 403 Forbidden)
+curl -k -s -o /dev/null -w "%{http_code}\n" -X POST https://localvts.com:2000/client_api/add \
+  -u vts_tester:***** -H "Content-Type: application/json" -d '{"Customer_ID": "TEST_ID"}'
+# Output: 403
+
+# 3. User Role Read (vts_tester - Allowed - HTTP 200 OK)
+curl -k -s -o /dev/null -w "%{http_code}\n" -X POST https://localvts.com:2000/client_api/get \
+  -u vts_tester:***** -H "Content-Type: application/json" -d '{"index": 1, "columns": ["Customer_ID"]}'
+# Output: 200
+
+# 4. Administrator Role Write (vts_admin / maheshd - Allowed - HTTP 200 OK)
+curl -k -s -o /dev/null -w "%{http_code}\n" -X POST https://localvts.com:2000/client_api/add \
+  -u vts_admin:***** -H "Content-Type: application/json" -d '{"Customer_ID": "ADMIN_ID"}'
+# Output: 200
+```
+
+#### Live RBAC Verification Matrix:
+
+| Test Scenario | User & Credentials | Target Endpoint | HTTP Status | Security Enforcement Result |
+| :--- | :--- | :--- | :---: | :--- |
+| **Anonymous Write** | None (Anonymous) | `POST :8888/client_api/add` | **`400`** |  **Blocked** (Unauthenticated write rejected) |
+| **Anonymous Write (Team 1)** | None (Anonymous) | `POST :2000/client_api/add` | **`400`** |  **Blocked** (Unauthenticated write rejected) |
+| **User Role Read** | `vts_tester` (`user` role) | `POST :8888/client_api/get` | **`200`** |  **Allowed** (Read authorized) |
+| **User Role Write** | `vts_tester` (`user` role) | `POST :8888/client_api/update`| **`403`** |  **Forbidden** (RBAC blocks data modification) |
+| **User Role Write (Team 1)** | `vts_tester` (`user` role) | `POST :2000/client_api/add` | **`403`** |  **Forbidden** (RBAC blocks data modification) |
+| **User Role Write (Team 2)** | `vts_viewer` (`user` role) | `POST :2001/client_api/add` | **`403`** |  **Forbidden** (RBAC blocks data modification) |
+| **Admin Role Read** | `vts_admin` (`admin` role) | `POST :8888/client_api/get` | **`200`** |  **Allowed** (Read authorized) |
+| **Admin Role Write** | `vts_admin` (`admin` role) | `POST :8888/client_api/update`| **`200`** |  **Allowed** (Data updated successfully) |
+| **Admin Role Write (Team 1)**| `vts_admin` (`admin` role) | `POST :2000/client_api/add` | **`200`** |  **Allowed** (Data added successfully) |
+| **Master Admin Write** | `maheshd` (`admin` role) | `POST :2001/client_api/add` | **`200`** |  **Allowed** (Data added successfully) |
+| **Web Admin UI (Port 4000)**| None (Anonymous) | `GET :4000/` | **`401`** |  **Blocked** (Login required) |
+| **Web Admin UI (Port 4000)**| `maheshd` & `vts_admin` | `GET :4000/` | **`200`** |  **Allowed** (Full admin access) |
+
+---
+
 ## 10. Performance Testing / VuGen Integration Guide
 
-### Integration in LoadRunner / VuGen Scripts
-In VuGen C scripts or Java protocols, scripts connect directly to the target instance port:
+### Secure VuGen Integration & Cryptographic Architecture
 
+> [!IMPORTANT]
+> **Authentication vs. Encryption Clarification for Architecture & Security:**
+> * **Authentication:** Provided via **HTTP Basic Authentication** enforced with strict **Role-Based Access Control (RBAC)** (`requireBasicAuthForAPI = true`).
+> * **Encryption:** Provided by **HTTPS / TLS 1.2 & TLS 1.3** because `"useSSL": true` is active in `configure.json`:
+>   * **Encryption Standard:** **AES-256-GCM** with **ECDHE-RSA** key exchange (enterprise/military-grade encryption).
+>   * **What is Protected:** The Basic Auth credentials, HTTP request/response headers, target URL, and table row data are all encrypted inside the TLS tunnel before they leave the client computer. No one on the network can read, sniff, or decode them.
+
+#### 1. In-Transit Wire Encryption (HTTPS / TLS 1.2 & TLS 1.3)
+* **How it works:** Every active port (`4000`, `8888`, `2000`, `2001`, etc.) is natively encrypted by OpenText VTS using TLS 1.2 and TLS 1.3 with strong cipher suites (`TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`, `TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384`).
+* **Basic Auth Over TLS:** When `Authorization: Basic <base64>` headers or VTS API calls traverse the network, the **entire HTTP packet (headers, credentials, URLs, and row data) is encrypted** at the socket layer before reaching the network interface card (NIC).
+* **Network Sniffing Protection:** Anyone capturing packets on the network (via Wireshark, firewalls, or packet analyzers) sees only encrypted binary TLS payload. Plaintext credentials and table data cannot be intercepted or decoded.
+* **Production Certificate:** In enterprise production, replace the self-signed certificate with an Internal Enterprise PKI / CA-signed certificate for zero-trust certificate chain validation.
+
+#### 2. At-Rest Script Credential Encryption (`lr_decrypt`)
+* Testers do **not** hardcode plaintext passwords in their LoadRunner scripts or source control repositories (Git/GitLab).
+* Testers use LoadRunner’s built-in **Password Encoder Utility** (`lr_encrypt` CLI or VuGen -> Tools -> Encrypt String) to generate an encrypted hex string representation of the password.
+* In the VuGen C script, `lrvtc_connect_ex` decrypts the credential dynamically in RAM only at the moment of establishing the TLS connection:
+
+```c
+int rc;
+
+// Secure connection to VTS instance with encrypted credentials
+rc = lrvtc_connect_ex(
+    "localvts.com",                                 // Target VTS Server FQDN / IP
+    2000,                                           // Target Instance Port
+    VTOPT_KEEP_ALIVE,                               // Keep-Alive connection
+    "vts_admin",                                    // Authorized Service Account (with write/admin rights)
+    lr_decrypt("6728e93892849202a0b1"),             // Encrypted Password (at-rest in script)
+    "",                                             // Domain (empty for Basic Auth)
+    "Basic"                                         // Authentication Protocol
+);
+
+if (rc == 0) {
+    lr_output_message("Secure connection to VTS established successfully.");
+} else {
+    lr_error_message("VTS Connection failed with error: %d", rc);
+}
+```
+
+#### 3. Enterprise CI/CD Secrets Injection (Alternative for Zero-Touch Scripts)
+* For teams using Jenkins, GitLab CI/CD, or Azure DevOps:
+  * Store the service account password in the CI/CD secret manager (e.g. Jenkins Credentials, HashiCorp Vault, CyberArk).
+  * Inject the secret into the test run dynamically as a command-line parameter (e.g. `-p_VtsPass ${VTS_PASSWORD}`).
+  * The script calls `lrvtc_connect_ex(..., lr_eval_string("{p_VtsPass}"), ...)` — eliminating credentials from script files entirely.
+
+#### 4. Database At-Rest Encryption (Windows OS / Storage Layer)
+* VTS tables are stored as disk-backed SQLite files in `F:\VTS_Data` (e.g. `Default.vts`, `Test_Team_1.vts`).
+* To guarantee at-rest storage protection:
+  * Enable **Windows BitLocker Drive Encryption** (AES-XTS 256-bit) on the dedicated `F:\` volume.
+  * Restrict NTFS folder permissions on `F:\VTS_Data` to `SYSTEM` and `Administrators` only.
+
+---
+
+### Standard VuGen C Integration (Legacy / Anonymous Mode)
+If running in an isolated test laboratory with network-level firewall whitelisting:
 ```c
 // Connect to VTS Team Instance on Windows Server 2025
 PVCI pvci = vtc_connect("localvts.com", 2000, VTOPT_KEEP_ALIVE);
