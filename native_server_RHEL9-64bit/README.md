@@ -216,6 +216,7 @@ Reference file: [`configure.json`](file:///home/mahesh/vts_ocp/native_server_RHE
 | `dbInfo.dbServerPort` | `6000–7000` | **`10000–30000`** | Expands Valkey port pool (20,001 ports) to prevent `redisdrv.go:219` startup collisions across 20 instances. |
 | `dbInfo.dbCheck.waitingTime` | `1` | **`10`** | Prevents supervisor watchdog lock timeouts during heavy write bursts. |
 | `logger.transports.file.path` | `/tmp/VTS` | **`/var/log/vts/vts.log`** | Dedicated log directory owned by `vts_svc:vts_svc`. |
+| `admin.requireBasicAuthForAPI` | `false` | **`true`** | Enforces Basic Auth + RBAC (`administrator` R/W vs `user` read-only) on all `/client_api/*` calls. |
 | `admin.useSSL` | `false` | **`false`** | TLS is terminated cleanly at NGINX (`:443`) and proxied over loopback. |
 
 *(Enterprise Vault & App Accounts Note: Use standardized service accounts like `svc_vts_admin` (`administrator`), `svc_vts_writer` (`administrator`), and `svc_vts_reader` (`user`, read-only) in production instead of personal IDs. Because VTS reads `configure.json` statically at startup, onboard `svc_vts_*` passwords in the Enterprise Password Vault with **scheduled change-window rotation** rather than unscheduled mid-test auto-rotation, and keep `configure.json` locked at `chmod 600`.)*
@@ -428,4 +429,58 @@ Widening `dbServerPort` to **`10000–30000`** (`ip_local_port_range = 32768 650
 2. **Cross-Instance Data Isolation & Persistence Across Full VM Reboot:**
    * Wrote distinct row-1 markers (`UNIQUE_B_001` on `Instance-B :2000`, `UNIQUE_E_001` on `Instance-E :2003`) before reboot.
    * **Observed After Full VM Reboot:** `Instance-B (:2000)` returned `UNIQUE_B_001`, `Instance-E (:2003)` returned `UNIQUE_E_001`, and **all 20 instances (`8888`, `2000–2018`)** retained exact **`4,000` rows × `7` columns** (`80,000` total records). *(Allow ~30–35s after boot for `apiserver` + `verify_instances.sh` to finish starting all 20 instances sequentially).*
+
+---
+
+## 8. Backend API Security & Role-Based Access Control (RBAC) Validation
+
+When `requireBasicAuthForAPI: true` is configured in `configure.json`, OpenText VTS enforces strict Role-Based Access Control (RBAC) across all instance endpoints routed through NGINX HTTPS (`:443`):
+
+### Verification Commands (Executed Over NGINX Port 443)
+```bash
+# 1. Anonymous Read (Allowed for high-speed script data queries)
+curl -k -s -o /dev/null -w "%{http_code}\n" -X POST "https://vts-server.local/?portnumber=2000/client_api/get" \
+  -H "Content-Type: application/json" -d '{"colName":"Customer_ID","index":1}'
+# Output: 200
+
+# 2. Anonymous Write (Blocked - rejects unauthenticated mutation)
+curl -k -s -o /dev/null -w "%{http_code}\n" -X POST "https://vts-server.local/?portnumber=2000/client_api/update" \
+  -H "Content-Type: application/json" -d '{"index":1,"column":"Customer_ID","value":"BLOCKED"}'
+# Output: 400
+
+# 3. User Role Read (johns - user role - Allowed)
+curl -k -s -u "johns:*****" -o /dev/null -w "%{http_code}\n" -X POST "https://vts-server.local/?portnumber=2000/client_api/get" \
+  -H "Content-Type: application/json" -d '{"colName":"Customer_ID","index":1}'
+# Output: 200
+
+# 4. User Role Write (johns - user role - Blocked by RBAC)
+curl -k -s -u "johns:*****" -o /dev/null -w "%{http_code}\n" -X POST "https://vts-server.local/?portnumber=2000/client_api/update" \
+  -H "Content-Type: application/json" -d '{"index":1,"column":"Customer_ID","value":"BLOCKED"}'
+# Output: 403 Forbidden
+
+# 5. Administrator Role Read & Write (maheshd - administrator role - Allowed)
+curl -k -s -u "maheshd:*****" -o /dev/null -w "%{http_code}\n" -X POST "https://vts-server.local/?portnumber=2000/client_api/get" \
+  -H "Content-Type: application/json" -d '{"colName":"Customer_ID","index":1}'
+# Output: 200
+
+curl -k -s -u "maheshd:*****" -o /dev/null -w "%{http_code}\n" -X POST "https://vts-server.local/?portnumber=2000/client_api/update" \
+  -H "Content-Type: application/json" -d '{"index":1,"column":"Customer_ID","value":"UNIQUE_B_001"}'
+# Output: 200
+```
+
+### Live RBAC Enforcement Matrix
+
+| Test Scenario | User & Role | Target Endpoint | HTTP Status | Security Enforcement Result |
+| :--- | :--- | :--- | :---: | :--- |
+| **Anonymous Read** | None (Anonymous) | `POST :443/?portnumber=2000/client_api/get` | **`200`** |  **Allowed** (Read authorized for load testing) |
+| **Anonymous Write** | None (Anonymous) | `POST :443/?portnumber=2000/client_api/update` | **`400`** |  **Blocked** (Unauthenticated write rejected) |
+| **Anonymous Pop** | None (Anonymous) | `POST :443/?portnumber=2000/client_api/pop` | **`401`** |  **Unauthorized** (Queue mutation rejected) |
+| **User Role Read** | `johns` (`user` role) | `POST :443/?portnumber=2000/client_api/get` | **`200`** |  **Allowed** (Read authorized) |
+| **User Role Write** | `johns` (`user` role) | `POST :443/?portnumber=2000/client_api/update` | **`403`** |  **Forbidden** (RBAC blocks data modification) |
+| **Admin Role Read** | `maheshd` (`admin` role) | `POST :443/?portnumber=2000/client_api/get` | **`200`** |  **Allowed** (Read authorized) |
+| **Admin Role Write** | `maheshd` (`admin` role) | `POST :443/?portnumber=2000/client_api/update` | **`200`** |  **Allowed** (Data updated successfully) |
+| **Web Admin UI** | None (Anonymous) | `GET :443/` | **`401`** |  **Blocked** (Login required) |
+| **Web Admin UI** | `maheshd` (`admin` role) | `GET :443/` | **`200`** |  **Allowed** (Full admin access) |
+| **Internal Engine Port**| Any (Direct loopback)| `GET :443/?portnumber=6157/` | **`403`** |  **Forbidden** (NGINX blocks SSRF to Valkey) |
+
 
