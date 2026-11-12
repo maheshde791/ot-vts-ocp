@@ -76,6 +76,11 @@ conn_pool = db_info.setdefault("connPool", {})
 conn_pool["maxIdle"] = 5000
 conn_pool["maxActive"] = 5000
 
+# Widen internal Valkey port range (10000-30000) to avoid 6000-7000 Birthday Paradox collisions
+db_port = db_info.setdefault("dbServerPort", {})
+db_port["start"] = 10000
+db_port["end"] = 30000
+
 db_check = db_info.setdefault("dbCheck", {})
 db_check["waitingTime"] = 10
 db_check["retryTimes"] = 3600
@@ -84,7 +89,7 @@ with open(conf_path, "w", encoding="utf-8") as f:
     json.dump(cfg, f, indent=2)
     f.write("\n")
 
-print(f"  -> defaultStart=True, autoRefreshGrid=False, connPool=5000, waitingTime=10s, requireBasicAuthForAPI={cfg['admin'].get('requireBasicAuthForAPI')}")
+print(f"  -> defaultStart=True, autoRefreshGrid=False, connPool=5000, dbServerPort=10000-30000, waitingTime=10s, requireBasicAuthForAPI={cfg['admin'].get('requireBasicAuthForAPI')}")
 PYEOF
 
 # ------------------------------------------------------------------------------
@@ -134,6 +139,97 @@ TimeoutStopSec=30
 EOF
 echo "  -> Added systemd ExecStop graceful save hook for vts.service"
 
+# Create post-start self-healing watchdog (detects & heals redisdrv.go Valkey port collisions)
+cat << 'EOF' > /opt/OT/OT_VTS/verify_instances.sh
+#!/usr/bin/env bash
+set -u
+python3 - << 'PYEOF'
+import base64, json, os, socket, subprocess, time, urllib.request
+
+CONF = "/opt/OT/OT_VTS/web/configure.json"
+INST = "/opt/OT/OT_VTS/web/instances.json"
+CLI  = "/opt/OT/OT_VTS/web/valkey-cli"
+
+with open(CONF, "r", encoding="utf-8") as f:
+    cfg = json.load(f)
+
+admin_port = int(cfg.get("adminPort", 4000))
+default_db = cfg.get("defaultDbName", "Default")
+default_api_port = int(cfg.get("defaultApiPort", 8888))
+
+admin_names = set(cfg.get("admin", {}).get("role", {}).get("administrator", []))
+auth_user = next((u for u in cfg.get("admin", {}).get("users", []) if u.get("user") in admin_names), None)
+if auth_user is None and cfg.get("admin", {}).get("users"):
+    auth_user = cfg["admin"]["users"][0]
+
+instances = []
+if os.path.exists(INST):
+    with open(INST, "r", encoding="utf-8") as f:
+        instances = json.load(f) or []
+
+expected_ports = [default_api_port] + [int(x["port"]) for x in instances if x.get("serviceStatus")]
+expected_names = ([default_db] if cfg.get("defaultStart", True) else []) + [x["name"] for x in instances if x.get("serviceStatus")]
+
+# Wait up to 45s for apiserver to finish sequential startup across all instances
+deadline = time.time() + 45
+while time.time() < deadline:
+    up = 0
+    for p in [admin_port] + expected_ports:
+        s = socket.socket()
+        s.settimeout(0.5)
+        if s.connect_ex(("127.0.0.1", p)) == 0:
+            up += 1
+        s.close()
+    if up == 1 + len(expected_ports):
+        break
+    time.sleep(1)
+
+time.sleep(2)
+
+def active_valkey_dirs():
+    out = subprocess.check_output(["ps", "-eo", "args"], text=True)
+    dirs = set()
+    for line in out.splitlines():
+        if "valkey-server 127.0.0.1:" in line:
+            port = line.strip().split()[-1].split(":")[-1]
+            try:
+                res = subprocess.check_output([CLI, "-p", port, "CONFIG", "GET", "dir"], text=True, stderr=subprocess.DEVNULL)
+                lines = [l.strip() for l in res.splitlines() if l.strip()]
+                if lines:
+                    dirs.add(os.path.basename(lines[-1]))
+            except Exception:
+                pass
+    return dirs
+
+if auth_user:
+    token = base64.b64encode(f"{auth_user['user']}:{auth_user['password']}".encode()).decode()
+    headers = {"Authorization": f"Basic {token}", "Content-Type": "application/json"}
+    for attempt in range(1, 4):
+        active = active_valkey_dirs()
+        missing = [x["name"] for x in instances if x.get("serviceStatus") and x["name"] not in active]
+        if not missing:
+            print(f"[verify_instances] OK: {len(active)}/{len(expected_names)} isolated Valkey instances active.")
+            break
+        print(f"[verify_instances] Attempt {attempt}: healing Valkey port collision for {missing}")
+        for name in missing:
+            for action in ("stop", "start"):
+                req = urllib.request.Request(f"http://127.0.0.1:{admin_port}/instances/{name}/{action}", data=b"{}", method="POST", headers=headers)
+                try:
+                    urllib.request.urlopen(req, timeout=10).read()
+                except Exception as e:
+                    print(f"[verify_instances] {name}/{action} warning: {e}")
+                time.sleep(1.5 if action == "stop" else 2.5)
+PYEOF
+EOF
+chmod +x /opt/OT/OT_VTS/verify_instances.sh
+
+cat << 'EOF' > /etc/systemd/system/vts.service.d/verify-instances.conf
+[Service]
+ExecStartPost=/opt/OT/OT_VTS/verify_instances.sh
+TimeoutStartSec=120
+EOF
+echo "  -> Added systemd ExecStartPost collision self-heal watchdog for vts.service"
+
 # ------------------------------------------------------------------------------
 # [4/6] Tune RHEL 9 Kernel TCP Stack & Memory Overcommit
 # ------------------------------------------------------------------------------
@@ -142,10 +238,10 @@ cat << 'EOF' > /etc/sysctl.d/99-vts-tuning.conf
 # Prevent Valkey/Redis BGSAVE fork failures under high memory load
 vm.overcommit_memory = 1
 
-# Expand socket backlog & ephemeral ports for high-concurrency VUser load
+# Expand socket backlog & keep ephemeral client ports (32768-65000) separate from Valkey dbServerPort (10000-30000)
 net.core.somaxconn = 16384
 net.core.netdev_max_backlog = 16384
-net.ipv4.ip_local_port_range = 1024 65000
+net.ipv4.ip_local_port_range = 32768 65000
 net.ipv4.tcp_tw_reuse = 1
 EOF
 sysctl --system >/dev/null
@@ -254,11 +350,12 @@ echo "[6/6] Reloading systemd and restarting services..."
 systemctl daemon-reload
 systemctl restart vts
 systemctl restart nginx
-sleep 4
+sleep 2
 
 echo ""
-echo "=== Active Services & Ports Verification ==="
+echo "=== Active Services, Valkey Isolation & Ports Verification ==="
 systemctl is-active vts nginx
+echo "Active valkey-server processes: $(pgrep -xc valkey-server || true)"
 ss -tlnp | grep -E '(:443|:80|:4000|:8888|:2000|:2001)'
 
 echo ""

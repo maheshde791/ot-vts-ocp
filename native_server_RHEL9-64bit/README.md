@@ -41,11 +41,11 @@ LoadRunner / API Clients
 
 ## 2. Step-by-Step Deployment on RHEL 9
 
-### Step 1: OS Admin Account, Jumpbox Access, Hostname & CyberArk Onboarding
-In enterprise deployments, SSH logins are permitted **only via the Jumpbox / CyberArk PSM**, never directly from general workstations.
+### Step 1: OS Admin Account, Bastion Access, Hostname & PAM Vault Onboarding
+In enterprise deployments, SSH logins are permitted **only via the approved Management Bastion / Enterprise PAM session**, never directly from general workstations.
 
 ```bash
-# 1. Create vtsadmin OS admin user (onboarded to CyberArk Safe for Jumpbox SSH login)
+# 1. Create vtsadmin OS admin user (onboarded to Enterprise Password Vault for bastion SSH login)
 sudo useradd -m -s /bin/bash vtsadmin
 echo "vtsadmin:*****" | sudo chpasswd
 
@@ -54,9 +54,9 @@ echo "vtsadmin ALL=(root) PASSWD: /usr/bin/systemctl start vts, /usr/bin/systemc
   | sudo tee /etc/sudoers.d/vtsadmin
 sudo chmod 440 /etc/sudoers.d/vtsadmin
 
-# 2. Harden SSH for Jumpbox + CyberArk CPM/PSM only (in /etc/ssh/sshd_config)
+# 2. Harden SSH for Bastion + Enterprise PAM only (in /etc/ssh/sshd_config)
 #    Ensure: PermitRootLogin no
-#            AllowUsers vtsadmin <cyberark_reconcile_user>
+#            AllowUsers vtsadmin <pam_reconcile_user>
 sudo systemctl reload sshd
 
 # 3. Set hostname & local hosts mapping
@@ -178,16 +178,16 @@ sudo nginx -t
 sudo systemctl enable --now nginx
 ```
 
-### Step 4: Harden Firewall (`firewalld`) & Jumpbox Access
-Expose `80`/`443` for LoadRunner Generators/clients, restrict SSH (`22`) to the **Jumpbox + CyberArk CPM/PSM IPs only**, and block all backend VTS ports (`4000`, `8888`, `2000–2050`):
+### Step 4: Harden Firewall (`firewalld`) & Bastion SSH Access
+Expose `80`/`443` for LoadRunner Generators/clients, restrict SSH (`22`) to the **Management Bastion + Enterprise PAM IPs only**, and block all backend VTS ports (`4000`, `8888`, `2000–2050`):
 ```bash
 sudo firewall-cmd --add-service=https --permanent
 sudo firewall-cmd --add-service=http --permanent
 
-# In Production: restrict SSH strictly to Jumpbox & CyberArk subnets
+# In Production: restrict SSH strictly to Management Bastion & PAM Vault subnets
 # sudo firewall-cmd --remove-service=ssh --permanent
-# sudo firewall-cmd --add-rich-rule='rule family="ipv4" source address="<JUMPBOX_CIDR>" service name="ssh" accept' --permanent
-# sudo firewall-cmd --add-rich-rule='rule family="ipv4" source address="<CYBERARK_CPM_PSM_CIDR>" service name="ssh" accept' --permanent
+# sudo firewall-cmd --add-rich-rule='rule family="ipv4" source address="<BASTION_CIDR>" service name="ssh" accept' --permanent
+# sudo firewall-cmd --add-rich-rule='rule family="ipv4" source address="<PAM_VAULT_CIDR>" service name="ssh" accept' --permanent
 
 sudo firewall-cmd --remove-port=4000/tcp --permanent 2>/dev/null || true
 sudo firewall-cmd --remove-port=8888/tcp --permanent 2>/dev/null || true
@@ -213,17 +213,19 @@ Reference file: [`configure.json`](file:///home/mahesh/vts_ocp/native_server_RHE
 | `autoRefreshGrid` | `true` | **`false`** | Prevents Web Admin UI auto-polling read locks during high-load runs. |
 | `maxInstancesAllowed` | `50` | **`50`** | Supports 20+ simultaneous team instances. |
 | `dbInfo.connPool.maxIdle` / `maxActive` | `3500` | **`5000`** | Prevents connection pool exhaustion across 20 instances & 6,500 VUsers. |
+| `dbInfo.dbServerPort` | `6000–7000` | **`10000–30000`** | Expands Valkey port pool (20,001 ports) to prevent `redisdrv.go:219` startup collisions across 20 instances. |
 | `dbInfo.dbCheck.waitingTime` | `1` | **`10`** | Prevents supervisor watchdog lock timeouts during heavy write bursts. |
 | `logger.transports.file.path` | `/tmp/VTS` | **`/var/log/vts/vts.log`** | Dedicated log directory owned by `vts_svc:vts_svc`. |
 | `admin.useSSL` | `false` | **`false`** | TLS is terminated cleanly at NGINX (`:443`) and proxied over loopback. |
 
-*(CyberArk & App Accounts Note: Use standardized service accounts like `svc_vts_admin` (`administrator`), `svc_vts_writer` (`administrator`), and `svc_vts_reader` (`user`, read-only) in production instead of personal IDs. Because VTS reads `configure.json` statically at startup, onboard `svc_vts_*` passwords in CyberArk Safe with **scheduled change-window rotation** rather than unscheduled mid-test CPM rotation, and keep `configure.json` locked at `chmod 600`.)*
+*(Enterprise Vault & App Accounts Note: Use standardized service accounts like `svc_vts_admin` (`administrator`), `svc_vts_writer` (`administrator`), and `svc_vts_reader` (`user`, read-only) in production instead of personal IDs. Because VTS reads `configure.json` statically at startup, onboard `svc_vts_*` passwords in the Enterprise Password Vault with **scheduled change-window rotation** rather than unscheduled mid-test auto-rotation, and keep `configure.json` locked at `chmod 600`.)*
 
-### B. Valkey Persistence & Shutdown Hook (`/opt/OT/OT_VTS/web/redis.conf`)
-By default on RHEL 9, `redis.conf` ships with `appendonly no` and long RDB save intervals (`3600 1 300 100 60 10000`). To prevent data loss across restarts:
+### B. Valkey Persistence, Shutdown Hook & Collision Self-Heal (`/opt/OT/OT_VTS/web/redis.conf`)
+By default on RHEL 9, `redis.conf` ships with `appendonly no` and long RDB save intervals (`3600 1 300 100 60 10000`). To prevent data loss and multi-instance port collisions across restarts:
 1. Flush live memory and rewrite AOF **before** enabling `appendonly yes` (so Valkey does not load an empty legacy AOF file).
 2. Add `save 60 1` and `appendonly yes` (`appendfsync everysec`) in `/opt/OT/OT_VTS/web/redis.conf`.
-3. Install a systemd `ExecStop` drop-in (`/etc/systemd/system/vts.service.d/graceful-save.conf` calling `/opt/OT/OT_VTS/graceful_save.sh`) to run `valkey-cli -p <port> save && sync` on every active Valkey instance before `vts.service` stops or the VM reboots.
+3. Install systemd `ExecStop` (`/etc/systemd/system/vts.service.d/graceful-save.conf` calling `/opt/OT/OT_VTS/graceful_save.sh`) to flush every active Valkey instance to disk before `vts.service` stops or the VM reboots.
+4. Install systemd `ExecStartPost` (`/etc/systemd/system/vts.service.d/verify-instances.conf` calling `/opt/OT/OT_VTS/verify_instances.sh`) to verify each enabled instance has its own dedicated `valkey-server` directory (`CONFIG GET dir`) and auto-restart any instance that hits a random `redisdrv.go:219` Valkey port collision during startup.
 
 ### C. NGINX Global Configuration (`/etc/nginx/nginx.conf`)
 Reference file: [`nginx.conf`](file:///home/mahesh/vts_ocp/native_server_RHEL9-64bit/nginx.conf)
@@ -254,7 +256,7 @@ Reference file: [`vts.conf`](file:///home/mahesh/vts_ocp/native_server_RHEL9-64b
 vm.overcommit_memory = 1
 net.core.somaxconn = 16384
 net.core.netdev_max_backlog = 16384
-net.ipv4.ip_local_port_range = 1024 65000
+net.ipv4.ip_local_port_range = 32768 65000
 net.ipv4.tcp_tw_reuse = 1
 ```
 
@@ -405,3 +407,25 @@ python3 high_volume_bench.py --all-20 --read-workers 163 --write-workers 162 \
 * **100.0% Reliability Under Full Target Load:** All **65,000** concurrent R/W transactions across all **20 instances** returned **HTTP 200 OK** with **0 errors** at **7,150.72 RPS**.
 * **Empirical Proof for 24 vCPUs in Production:** The 8-vCPU lab VM sustained 7,150 RPS cleanly, but hit **75.5% avg / 100.0% peak CPU**, causing average response time to queue to `355 ms` (`502–524 ms` writes). Provisioning **24 vCPUs** in Enterprise production eliminates CPU saturation and drops latency back into the sub-50 ms range.
 * **Lean Memory Footprint:** All 20 instances (80,000 rows) plus NGINX consumed only **2,151 MB** (`13.7%` of 16 GB) peak RAM; **64 GB** in production ensures safe headroom for multi-gigabyte datasets and Copy-on-Write (`BGSAVE`/`BGREWRITEAOF`) forks.
+
+---
+
+## 7. Verified Reboot, Valkey Isolation & Persistence Validation
+
+### Why Valkey Port-Range Widening + `ExecStartPost` Self-Heal Are Required
+During reboot testing with 20 instances under OpenText VTS's default `dbServerPort` range (`6000–7000`, only 1,001 ports), `apiserver` experienced a ~17.4% Birthday Paradox port collision (`redisdrv.go:219 | !BADKEY=exit status 1` in `/var/log/vts/vts.log`). When that occurs, one instance's `valkey-server` fails to bind, and `apiserver` cross-wires that instance's API port onto another running instance's Valkey port.
+
+Widening `dbServerPort` to **`10000–30000`** (`ip_local_port_range = 32768 65000`) and installing `verify_instances.sh` (`ExecStartPost`) alongside `graceful_save.sh` (`ExecStop`) resolved this permanently.
+
+### Post-Reboot Verification Checklist & Observed Results
+1. **Service & Least-Privilege Verification:**
+   ```bash
+   systemctl is-active vts nginx
+   ps -u vts_svc -o comm= | grep -c '^valkey-server$'   # Must equal total active instances (20)
+   grep "redisdrv.go" /var/log/vts/vts.log              # Confirm zero new collision errors after boot
+   ```
+   * **Observed:** `vts.service` (`active`, `vts_svc`), `nginx.service` (`active`, `8` workers as `nginx`), and **20/20 distinct `valkey-server` processes** running on `10000–30000` (`10481`, `11552`, `11711`, `14348`, `16980`, etc.).
+2. **Cross-Instance Data Isolation & Persistence Across Full VM Reboot:**
+   * Wrote distinct row-1 markers (`UNIQUE_B_001` on `Instance-B :2000`, `UNIQUE_E_001` on `Instance-E :2003`) before reboot.
+   * **Observed After Full VM Reboot:** `Instance-B (:2000)` returned `UNIQUE_B_001`, `Instance-E (:2003)` returned `UNIQUE_E_001`, and **all 20 instances (`8888`, `2000–2018`)** retained exact **`4,000` rows × `7` columns** (`80,000` total records). *(Allow ~30–35s after boot for `apiserver` + `verify_instances.sh` to finish starting all 20 instances sequentially).*
+

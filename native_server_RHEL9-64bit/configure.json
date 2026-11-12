@@ -64,8 +64,8 @@
       "maxActive": 5000
     },
     "dbServerPort": {
-      "start": 6000,
-      "end": 7000
+      "start": 10000,
+      "end": 30000
     },
     "dbCheck": {
       "waitingTime": 10,

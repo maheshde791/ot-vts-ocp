@@ -837,7 +837,7 @@ if (rc == 0) {
 
 #### 3. Enterprise CI/CD Secrets Injection (Alternative for Zero-Touch Scripts)
 * For teams using Jenkins, GitLab CI/CD, or Azure DevOps:
-  * Store the service account password in the CI/CD secret manager (e.g. Jenkins Credentials, HashiCorp Vault, CyberArk).
+  * Store the service account password in the CI/CD secret manager (e.g. Jenkins Credentials, Enterprise Secrets Vault).
   * Inject the secret into the test run dynamically as a command-line parameter (e.g. `-p_VtsPass ${VTS_PASSWORD}`).
   * The script calls `lrvtc_connect_ex(..., lr_eval_string("{p_VtsPass}"), ...)` — eliminating credentials from script files entirely.
 
