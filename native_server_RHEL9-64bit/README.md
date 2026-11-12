@@ -277,15 +277,174 @@ sudo bash tune_rhel_vts.sh --enable-api-auth
 
 ---
 
-## 5. LoadRunner VuGen Configuration
+## 5. Performance Tester Guide: VuGen Runtime Settings & Script Integration
 
-1. In VuGen, open **Runtime Settings (`F4`) $\rightarrow$ General $\rightarrow$ Miscellaneous $\rightarrow$ VTS**.
-2. Check ☑ **"Access VTS port by query string"** and set Port to **`443`**.
-3. Authenticate scripts with `lrvtc_connect_ex`:
-   ```c
-   lrvtc_connect_ex("vts-server.local", 2000, VTOPT_KEEP_ALIVE,
-                    "maheshd", lr_decrypt("<encrypted_password>"), "", "Basic");
-   ```
+This section provides performance engineers and automation testers with exact instructions for configuring LoadRunner VuGen, executing `lrvtc_*` APIs, and integrating non-VuGen test tools with VTS instances over HTTPS (`:443`).
+
+### 5.1 Load Generator (LG) Certificate Trust
+In enterprise production deployments, VTS is secured with an **Enterprise PKI TLS Certificate** issued by the corporate Internal Certificate Authority.
+* **Zero-Touch LG Configuration:** Because all corporate Windows Load Generators (LGs) and tester workstations are domain-joined, the corporate Root and Intermediate CA certificates are pre-installed in the Windows Trusted Root store.
+* **No action required on LGs:** Testers and LGs connect directly over standard HTTPS (`:443`) without installing certificates or configuring client-side trust exceptions.
+
+---
+
+### 5.2 VuGen Runtime Settings (`F4`)
+
+In LoadRunner VuGen, open **Runtime Settings (`F4`)** (or **Replay $\rightarrow$ Runtime Settings**):
+
+1. In the left navigation tree, navigate to **General $\rightarrow$ Miscellaneous**.
+2. Locate the **Virtual Table Server (VTS)** configuration section:
+   * **Server Name:** `<vts-server-fqdn>` *(e.g., `vts-server.corp.local`)*
+   * **Port:** **`443`**
+   * ☑ **Access VTS port by query string** *(Required: Enables NGINX reverse-proxy routing via `?portnumber=<instance_port>`)*
+   * **Connection Options:** Select **Keep-Alive** (`VTOPT_KEEP_ALIVE`)
+
+---
+
+### 5.3 VuGen C-Script Implementation (`lrvtc_*` APIs)
+
+#### A. Initializing Connection in `vuser_init.c`
+Connect to the assigned instance port (e.g., `2000–2050` for team instances, or `8888` for Default) using `lrvtc_connect_ex`. Authenticate using the appropriate service account role:
+
+```c
+#include "vts2.h"
+
+vuser_init()
+{
+    int rc;
+
+    // SCENARIO 1: Read-Only Workload (Service Account Role: "user", e.g., svc_vts_reader)
+    // For scripts that only query/search data without modifying table rows
+    rc = lrvtc_connect_ex("<vts-server-fqdn>", 2000, VTOPT_KEEP_ALIVE, 
+                          "svc_vts_reader", lr_decrypt("<encrypted_password>"), "", "Basic");
+
+    // SCENARIO 2: Read-Write Workload (Service Account Role: "administrator", e.g., svc_vts_writer)
+    // Required for scripts that POP, UPDATE, ADD, or CLEAR table records
+    /*
+    rc = lrvtc_connect_ex("<vts-server-fqdn>", 2000, VTOPT_KEEP_ALIVE, 
+                          "svc_vts_writer", lr_decrypt("<encrypted_password>"), "", "Basic");
+    */
+
+    if (rc != 0) {
+        lr_error_message("Failed to connect to VTS instance on port 2000. Error code: %d", rc);
+        return -1;
+    }
+
+    lr_output_message("Successfully connected to VTS instance over HTTPS :443");
+    return 0;
+}
+```
+
+#### B. Core Transaction Patterns in `Action.c`
+
+##### Pattern 1: Concurrent Shared Lookup (Read-Only)
+Multiple concurrent VUsers query rows without removing data from the table:
+```c
+Action()
+{
+    char *cust_id;
+    char *account_num;
+
+    // Query specific row index (e.g., row 10)
+    cust_id = lrvtc_query_column("Customer_ID", 10);
+    account_num = lrvtc_query_column("Account_Number", 10);
+
+    lr_save_string(cust_id, "p_CustomerID");
+    lr_save_string(account_num, "p_AccountNumber");
+
+    lr_output_message("Fetched test data: ID=%s, Account=%s", 
+                      lr_eval_string("{p_CustomerID}"), lr_eval_string("{p_AccountNumber}"));
+
+    // Execute application business process...
+    return 0;
+}
+```
+
+##### Pattern 2: Atomic Queue / Pop (One-Time Unique Test Data)
+Guarantees each VUser retrieves an exclusive record by popping it from the top of the table. *Requires Writer/Admin role*:
+```c
+Action()
+{
+    char *unique_account;
+
+    // Atomically retrieve and remove top record from queue
+    unique_account = lrvtc_pop_message("Account_Number");
+
+    if (unique_account == NULL || strlen(unique_account) == 0) {
+        lr_error_message("VTS Queue exhausted! No test records remaining.");
+        return -1;
+    }
+
+    lr_save_string(unique_account, "p_UniqueAccount");
+    lr_output_message("Popped exclusive record: %s", lr_eval_string("{p_UniqueAccount}"));
+
+    // Execute transaction with unique data...
+    return 0;
+}
+```
+
+##### Pattern 3: Updating Record Status (State Tracking)
+Updates a column in a specific row to mark it as consumed. *Requires Writer/Admin role*:
+```c
+Action()
+{
+    int target_row = 15;
+
+    // Update status column to prevent re-use
+    lrvtc_update_message("Account_Type", target_row, "PROCESSED");
+
+    lr_output_message("Marked record at row %d as PROCESSED", target_row);
+    return 0;
+}
+```
+
+#### C. Clean Connection Teardown in `vuser_end.c`
+Always close the connection at the end of the script to release keep-alive sockets gracefully:
+```c
+vuser_end()
+{
+    lrvtc_disconnect();
+    lr_output_message("Gracefully disconnected from VTS.");
+    return 0;
+}
+```
+
+---
+
+### 5.4 REST / API Integration (JMeter, Postman, Python, CI/CD Pipelines)
+
+Non-VuGen tools connect to VTS instances via HTTP/HTTPS REST calls routed through NGINX:
+
+* **Endpoint Syntax:** `https://<vts-server-fqdn>:443/?portnumber=<INSTANCE_PORT>/client_api/<METHOD>`
+* **Authorization:** Standard `Authorization: Basic <base64(user:password)>` header.
+
+#### REST Read Query Example:
+```bash
+curl -s -u "svc_vts_reader:*****" \
+  -X POST "https://<vts-server-fqdn>/?portnumber=2000/client_api/get" \
+  -H "Content-Type: application/json" \
+  -d '{"colName": "Customer_ID", "index": 1}'
+```
+
+#### REST Write Update Example (Requires Writer/Admin Role):
+```bash
+curl -s -u "svc_vts_writer:*****" \
+  -X POST "https://<vts-server-fqdn>/?portnumber=2000/client_api/update" \
+  -H "Content-Type: application/json" \
+  -d '{"index": 1, "column": "Account_Type", "value": "PROCESSED"}'
+```
+
+---
+
+### 5.5 Tester Access & Role Summary Reference
+
+| Operation Type | VuGen API Function | Required VTS Role | Target Port Pattern |
+| :--- | :--- | :--- | :--- |
+| **Shared Read** | `lrvtc_query_column` / `lrvtc_query_row` | `user` or `administrator` | Team Port (`2000–2050`) or Default (`8888`) |
+| **Atomic Pop (Queue)** | `lrvtc_pop_message` | `administrator` | Team Port (`2000–2050`) or Default (`8888`) |
+| **Update Record** | `lrvtc_update_message` | `administrator` | Team Port (`2000–2050`) or Default (`8888`) |
+| **Add New Record** | `lrvtc_send_message` | `administrator` | Team Port (`2000–2050`) or Default (`8888`) |
+| **Clear Column / Table**| `lrvtc_clear_column` / `lrvtc_clear_row` | `administrator` | Team Port (`2000–2050`) or Default (`8888`) |
 
 ---
 
