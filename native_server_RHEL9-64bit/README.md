@@ -41,40 +41,82 @@ LoadRunner / API Clients
 
 ## 2. Step-by-Step Deployment on RHEL 9
 
-### Step 1: OS User, Hostname & Static Network
+### Step 1: OS Admin Account, Jumpbox Access, Hostname & CyberArk Onboarding
+In enterprise deployments, SSH logins are permitted **only via the Jumpbox / CyberArk PSM**, never directly from general workstations.
+
 ```bash
-# 1. Create vtsadmin service administration user
+# 1. Create vtsadmin OS admin user (onboarded to CyberArk Safe for Jumpbox SSH login)
 sudo useradd -m -s /bin/bash vtsadmin
 echo "vtsadmin:*****" | sudo chpasswd
-echo "vtsadmin ALL=(ALL) PASSWD: ALL" | sudo tee /etc/sudoers.d/vtsadmin
 
-# 2. Set hostname & local hosts mapping
+# Grant scoped service-admin sudo (or PASSWD: ALL per organization unix standard)
+echo "vtsadmin ALL=(root) PASSWD: /usr/bin/systemctl start vts, /usr/bin/systemctl stop vts, /usr/bin/systemctl restart vts, /usr/bin/systemctl status vts, /usr/bin/systemctl reload nginx, /usr/bin/systemctl restart nginx, /usr/sbin/nginx -t" \
+  | sudo tee /etc/sudoers.d/vtsadmin
+sudo chmod 440 /etc/sudoers.d/vtsadmin
+
+# 2. Harden SSH for Jumpbox + CyberArk CPM/PSM only (in /etc/ssh/sshd_config)
+#    Ensure: PermitRootLogin no
+#            AllowUsers vtsadmin <cyberark_reconcile_user>
+sudo systemctl reload sshd
+
+# 3. Set hostname & local hosts mapping
 sudo hostnamectl set-hostname vts-server.local
 echo "192.168.122.245 vts-server.local vts-server" | sudo tee -a /etc/hosts
 ```
 
-### Step 2: Install OpenText VTS 26.1 & Create Systemd Service
+### Step 2: Install OpenText VTS 26.1 & Configure Non-Root `vts_svc` System Account
+VTS binds unprivileged ports (`4000`, `8888`, `2000–2050`, `6000–7000`, all `> 1024`), so it **does not need `root` privileges**. Running `vts.service` as a dedicated locked system user (`vts_svc`) ensures `apiserver`, `api_daemon`, and all `valkey-server` child processes (including any future instances added via UI/API) run strictly as `vts_svc`.
+
 ```bash
 # 1. Extract and install VTS into /opt/OT/OT_VTS
 unzip VTS_26.1_Linux.zip
 tar -xvf VTS_Linux.tar.gz
 sudo chmod +x inst64.bin
 sudo ./inst64.bin
-```
 
-Create `/opt/OT/OT_VTS/vts.sh`:
+# 2. Create locked non-login local system account for VTS (UID < 1000, no SSH/password login)
+sudo groupadd -r vts_svc
+sudo useradd -r -g vts_svc -d /opt/OT/OT_VTS -s /sbin/nologin -c "OpenText VTS Service" vts_svc
+sudo passwd -l vts_svc
+
+# 3. Create dedicated log directory (avoids RHEL 9 /tmp sticky-bit fs.protected_regular errors)
+sudo mkdir -p /var/log/vts
+sudo chown vts_svc:vts_svc /var/log/vts
+
+# 4. Point configure.json logger off /tmp/VTS to /var/log/vts/vts.log
+sudo python3 -c "
+import json
+p = '/opt/OT/OT_VTS/web/configure.json'
+with open(p) as f: c = json.load(f)
+c['logger']['transports']['file']['path'] = '/var/log/vts/vts.log'
+with open(p, 'w') as f: json.dump(c, f, indent=2); f.write('\n')
+"
+
+# 5. Apply least-privilege ownership, lock configure.json (600), and label SELinux binaries
+sudo chown -R vts_svc:vts_svc /opt/OT/OT_VTS /var/lib/OT/OT_VTS
+sudo chmod 600 /opt/OT/OT_VTS/web/configure.json
+sudo chmod 750 /var/lib/OT/OT_VTS/db/data
+sudo chcon -t bin_t /opt/OT/OT_VTS/vts.sh /opt/OT/OT_VTS/web/api_daemon \
+  /opt/OT/OT_VTS/web/apiserver /opt/OT/OT_VTS/web/cmdHandler /opt/OT/OT_VTS/web/valkey-*
+```
+*(If your Unix/IAM policy mandates an AD/SSSD service account instead of local `vts_svc`, use that AD account in `chown -R` and `User=` below, and add `After=network-online.target sssd.service` + `Wants=network-online.target` to `vts.service`.)*
+
+Create `/opt/OT/OT_VTS/vts.sh` (owned by `vts_svc:vts_svc`):
 ```bash
 #!/bin/sh
 cd /opt/OT/OT_VTS/web
 ./api_daemon </dev/null
 ```
 
-Create `/etc/systemd/system/vts.service` with raised open-file limits (`LimitNOFILE=999999`):
+Create `/etc/systemd/system/vts.service` running as `vts_svc` with raised open-file limits (`LimitNOFILE=999999`):
 ```ini
 [Unit]
 Description=VTS Service
+After=network.target
 
 [Service]
+User=vts_svc
+Group=vts_svc
 LimitNOFILE=999999
 ExecStart=/opt/OT/OT_VTS/vts.sh
 Restart=on-failure
@@ -82,9 +124,10 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 ```
-Enable and start:
+Enable and start *(always start/stop via `systemctl`, never manually run `vts.sh` as `root`)*:
 ```bash
 sudo chmod +x /opt/OT/OT_VTS/vts.sh
+sudo chown vts_svc:vts_svc /opt/OT/OT_VTS/vts.sh
 sudo systemctl daemon-reload
 sudo systemctl enable --now vts
 ```
@@ -120,6 +163,7 @@ sudo chmod 600 /etc/pki/tls/private/vts.key
 sudo chmod 644 /etc/pki/tls/certs/vts.crt
 
 # 2. Install NGINX & allow proxy connections in SELinux
+#    (RHEL RPM creates built-in locked system account 'nginx' (/sbin/nologin); workers drop to nginx:nginx automatically)
 sudo dnf install -y nginx
 sudo setsebool -P httpd_can_network_connect 1
 
@@ -134,18 +178,24 @@ sudo nginx -t
 sudo systemctl enable --now nginx
 ```
 
-### Step 4: Harden Firewall (`firewalld`)
-Expose only standard web ports (`80`, `443`) and `ssh`. Block direct external access to all backend VTS ports (`4000`, `8888`, `2000–2050`):
+### Step 4: Harden Firewall (`firewalld`) & Jumpbox Access
+Expose `80`/`443` for LoadRunner Generators/clients, restrict SSH (`22`) to the **Jumpbox + CyberArk CPM/PSM IPs only**, and block all backend VTS ports (`4000`, `8888`, `2000–2050`):
 ```bash
 sudo firewall-cmd --add-service=https --permanent
 sudo firewall-cmd --add-service=http --permanent
+
+# In Production: restrict SSH strictly to Jumpbox & CyberArk subnets
+# sudo firewall-cmd --remove-service=ssh --permanent
+# sudo firewall-cmd --add-rich-rule='rule family="ipv4" source address="<JUMPBOX_CIDR>" service name="ssh" accept' --permanent
+# sudo firewall-cmd --add-rich-rule='rule family="ipv4" source address="<CYBERARK_CPM_PSM_CIDR>" service name="ssh" accept' --permanent
+
 sudo firewall-cmd --remove-port=4000/tcp --permanent 2>/dev/null || true
 sudo firewall-cmd --remove-port=8888/tcp --permanent 2>/dev/null || true
 sudo firewall-cmd --remove-port=2000/tcp --permanent 2>/dev/null || true
 sudo firewall-cmd --remove-port=2001/tcp --permanent 2>/dev/null || true
 sudo firewall-cmd --remove-port=2000-2050/tcp --permanent 2>/dev/null || true
 sudo firewall-cmd --reload
-sudo firewall-cmd --list-all   # Confirm 'ports:' is empty; only http, https, ssh remain
+sudo firewall-cmd --list-all   # Confirm 'ports:' is empty; only http, https (+ scoped ssh) remain
 ```
 
 ---
@@ -164,9 +214,10 @@ Reference file: [`configure.json`](file:///home/mahesh/vts_ocp/native_server_RHE
 | `maxInstancesAllowed` | `50` | **`50`** | Supports 20+ simultaneous team instances. |
 | `dbInfo.connPool.maxIdle` / `maxActive` | `3500` | **`5000`** | Prevents connection pool exhaustion across 20 instances & 6,500 VUsers. |
 | `dbInfo.dbCheck.waitingTime` | `1` | **`10`** | Prevents supervisor watchdog lock timeouts during heavy write bursts. |
+| `logger.transports.file.path` | `/tmp/VTS` | **`/var/log/vts/vts.log`** | Dedicated log directory owned by `vts_svc:vts_svc`. |
 | `admin.useSSL` | `false` | **`false`** | TLS is terminated cleanly at NGINX (`:443`) and proxied over loopback. |
 
-*(Note: When `admin.authentication` is `"Basic"`, mutating endpoints like `/client_api/update`, `/add`, and `/import` always require HTTP Basic Auth credentials).*
+*(CyberArk & App Accounts Note: Use standardized service accounts like `svc_vts_admin` (`administrator`), `svc_vts_writer` (`administrator`), and `svc_vts_reader` (`user`, read-only) in production instead of personal IDs. Because VTS reads `configure.json` statically at startup, onboard `svc_vts_*` passwords in CyberArk Safe with **scheduled change-window rotation** rather than unscheduled mid-test CPM rotation, and keep `configure.json` locked at `chmod 600`.)*
 
 ### B. Valkey Persistence & Shutdown Hook (`/opt/OT/OT_VTS/web/redis.conf`)
 By default on RHEL 9, `redis.conf` ships with `appendonly no` and long RDB save intervals (`3600 1 300 100 60 10000`). To prevent data loss across restarts:

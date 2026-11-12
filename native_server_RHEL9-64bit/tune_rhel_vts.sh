@@ -240,6 +240,13 @@ fi
 
 nginx -t
 
+# Lock configure.json permissions and preserve non-root vts_svc ownership if present
+chmod 600 "${VTS_CONF}"
+if id vts_svc >/dev/null 2>&1; then
+    chown -R vts_svc:vts_svc /opt/OT/OT_VTS /var/lib/OT/OT_VTS
+    [[ -d /var/log/vts ]] && chown -R vts_svc:vts_svc /var/log/vts
+fi
+
 # ------------------------------------------------------------------------------
 # [6/6] Reload systemd & restart VTS + NGINX cleanly
 # ------------------------------------------------------------------------------
