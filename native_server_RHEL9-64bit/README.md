@@ -89,9 +89,27 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now vts
 ```
 
-### Step 3: Generate TLS Certificate & Install NGINX
+### Step 3: TLS Certificate (Lab vs. Enterprise PKI) & NGINX Deployment
+
+#### Production Enterprise PKI Requirements (When Ordering / Installing Cert On-Site)
+* **Certificate Type:** Server-only One-Way TLS certificate (EKU: **`Server Authentication` / OID `1.3.6.1.5.5.7.3.1`**). No client certificates (mTLS) are required.
+* **Format & Key Protection:** Base64 **PEM** `.crt` and `.key` files.
+  * **TLS Cipher vs. Key Passphrase:** NGINX negotiates **AES-256-GCM** on the wire with an RSA 2048/4096 (SHA-256) or ECDSA key. Do **not** leave a passphrase on `vts.key` (`BEGIN ENCRYPTED PRIVATE KEY`), otherwise NGINX will fail/hang on reboot waiting for a passphrase prompt; protect the unencrypted `.key` via `chmod 600` (`root:root`).
+  * **Chain Order in `vts.crt`:** Concatenate **Server Leaf Cert first, Intermediate/Issuing CA second** (so LoadRunner and `curl` validate cleanly without `"unable to verify the first certificate"`).
+* **FQDN & Subject Alternative Names (SANs):** Modern OpenSSL 3 (RHEL 9) and LoadRunner **require the server FQDN inside SAN** (not just `CN`). Set:
+  * **`CN`:** `<server-fqdn>`
+  * **`SAN`:** `DNS:<server-fqdn>`, `DNS:<short-hostname-or-alias>` *(and `IP:<server-ip>` if scripts connect by IP)*.
+* **If PKI Provides a `.pfx` / `.p12` Bundle (Convert on RHEL 9):**
+  ```bash
+  openssl pkcs12 -in bundle.pfx -clcerts -nokeys -out vts_leaf.crt
+  openssl pkcs12 -in bundle.pfx -cacerts -nokeys -chain -out vts_chain.crt
+  sudo sh -c 'cat vts_leaf.crt vts_chain.crt > /etc/pki/tls/certs/vts.crt'
+  sudo openssl pkcs12 -in bundle.pfx -nocerts -nodes -out /etc/pki/tls/private/vts.key
+  sudo chmod 600 /etc/pki/tls/private/vts.key && sudo chmod 644 /etc/pki/tls/certs/vts.crt
+  ```
+
 ```bash
-# 1. Generate 2048-bit RSA SAN certificate (Lab POC; use Enterprise PKI cert in Prod)
+# 1. Lab POC Only: Generate self-signed 2048-bit RSA SAN certificate (skip if using PKI cert above)
 sudo mkdir -p /etc/pki/tls/certs /etc/pki/tls/private
 sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
   -keyout /etc/pki/tls/private/vts.key \
@@ -117,14 +135,17 @@ sudo systemctl enable --now nginx
 ```
 
 ### Step 4: Harden Firewall (`firewalld`)
-Expose only standard web ports (`80`, `443`) and `ssh`. Block direct external access to backend ports (`4000`, `8888`, `2000–2050`):
+Expose only standard web ports (`80`, `443`) and `ssh`. Block direct external access to all backend VTS ports (`4000`, `8888`, `2000–2050`):
 ```bash
 sudo firewall-cmd --add-service=https --permanent
 sudo firewall-cmd --add-service=http --permanent
 sudo firewall-cmd --remove-port=4000/tcp --permanent 2>/dev/null || true
 sudo firewall-cmd --remove-port=8888/tcp --permanent 2>/dev/null || true
+sudo firewall-cmd --remove-port=2000/tcp --permanent 2>/dev/null || true
+sudo firewall-cmd --remove-port=2001/tcp --permanent 2>/dev/null || true
 sudo firewall-cmd --remove-port=2000-2050/tcp --permanent 2>/dev/null || true
 sudo firewall-cmd --reload
+sudo firewall-cmd --list-all   # Confirm 'ports:' is empty; only http, https, ssh remain
 ```
 
 ---
