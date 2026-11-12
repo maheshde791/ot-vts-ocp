@@ -30,6 +30,7 @@ while [[ $# -gt 0 ]]; do
         --write-reqs) WRITE_REQS_PER_WORKER="$2"; shift 2 ;;
         --vm-host) VM_HOST="$2"; shift 2 ;;
         --ssh-user) SSH_USER="$2"; shift 2 ;;
+        --max-index) MAX_INDEX="$2"; shift 2 ;;
         --auth) AUTH="$2"; shift 2 ;;
         --help|-h)
             echo "Usage: $0 [options]"
@@ -42,6 +43,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --write-reqs <n>        Requests per write worker (default: 50)"
             echo "  --vm-host <host>        Target VM for CPU/RAM monitoring (default: 192.168.122.245)"
             echo "  --ssh-user <user>       SSH user for VM monitoring (default: vtsadmin)"
+            echo "  --max-index <n>         Max row index for random R/W (default: 500)"
             echo "  --auth <user:pass>      HTTP Basic Auth credentials if enabled"
             exit 0
             ;;

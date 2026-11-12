@@ -997,3 +997,26 @@ The following benchmark tests were executed against all 3 active instances simul
   Get-NetFirewallRule -DisplayName "VTS*" | Select-Object DisplayName, Enabled, Direction, Action
   ```
 
+### Issue 4: VTS Service Starts & Immediately Stops / Panic `\x00`
+* **Symptom:** VTS service starts and immediately stops with Windows SCM error (*"Some services stop automatically if they are not in use..."*), or running `.\apiserver.exe` crashes with:
+  ```text
+  panic: invalid character '\x00' looking for beginning of value
+  ```
+* **Cause:** `instances.json` or `configure.json` contains null bytes (`0x00`) due to Windows PowerShell 5.1 writing UTF-16 LE by default or an abrupt VM shutdown flushing zero bytes to disk.
+* **Solution:** Execute the automated repair script:
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File .\fix_vts_null_bytes.ps1
+  ```
+  This sanitizes `instances.json` to pure UTF-8 without BOM, removes null bytes from `configure.json`, restarts the VTS service, and confirms port 4000 is listening.
+
+### Issue 5: Team Instances Inactive (Ports 2000, 2001, etc.) After Service Recovery
+* **Symptom:** Port `4000` (Admin UI) and Port `8888` (Default instance) are listening, but custom team instances (`Test_Team_1` on port `2000`, `Test_Team_2` on port `2001`) are stopped or missing from `instances.json`.
+* **Cause:** The default instance is defined in `configure.json` and starts automatically, whereas team instances are registered in `instances.json`. If `instances.json` was emptied or lost during recovery, team engines do not launch.
+* **Solution:** Execute the automated instance restoration script:
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File .\restore_vts_instances.ps1
+  ```
+  This scans `F:\VTS_Data` for existing `.vts` databases, re-registers `Test_Team_1` (port 2000) and `Test_Team_2` (port 2001) in `instances.json` with `serviceStatus: true` using clean UTF-8, restarts the VTS service, and validates all ports (`4000`, `8888`, `2000`, `2001`).
+
+
+
