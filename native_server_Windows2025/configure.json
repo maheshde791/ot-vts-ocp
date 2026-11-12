@@ -1,0 +1,100 @@
+{
+  "dbPath": "F:\\VTS_Data",
+  "defaultDbName": "Default",
+  "adminPort": 4000,
+  "defaultApiPort": 8888,
+  "defaultStart": false,
+  "enableDiag": false,
+  "autoRefreshGrid": true,
+  "maxInstancesAllowed": 50,
+  "autoCreateIndexedColumn": true,
+  "normalizeCSV": false,
+  "admin": {
+    "authentication": "Basic",
+    "users": [
+      {
+        "user": "maheshd",
+        "password": "*****",
+        "display": "Mahesh Deore"
+      },
+      {
+        "user": "vts_admin",
+        "password": "*****",
+        "display": "VTS Platform Admin"
+      },
+      {
+        "user": "vts_tester",
+        "password": "*****",
+        "display": "Performance Test User"
+      },
+      {
+        "user": "vts_viewer",
+        "password": "*****",
+        "display": "Read-Only Reporting Viewer"
+      }
+    ],
+    "role": {
+      "administrator": [
+        "maheshd",
+        "vts_admin"
+      ],
+      "user": [
+        "vts_tester",
+        "vts_viewer"
+      ]
+    },
+    "requireBasicAuthForAPI": true,
+    "domain": "",
+    "domaincontroller": "",
+    "ldapsCert": "",
+    "ldapsCA": "",
+    "useSSL": true,
+    "certificate": "F:\\VTS26.1\\web\\vts_win.crt",
+    "privateKey": "F:\\VTS26.1\\web\\vts_win.key",
+    "passphrase": "",
+    "ca": "F:\\VTS26.1\\web\\vts_win.crt",
+    "minVersion": "TLSv1.2",
+    "maxVersion": "TLSv1.3",
+    "ciphers": "ETCD_CIPHER_SUITES=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+    "requestClientCert": false
+  },
+  "languages": [
+    { "en": "en-us" },
+    { "zh-cn": [ "zh", "zh-sg" ] },
+    { "ja": "ja" },
+    { "ko": [ "zh", "zh-sg" ] },
+    { "it": "zh-hk" },
+    { "es": "zh-hk" },
+    { "fr": "fr-fr" },
+    { "ru": "ru" },
+    "de"
+  ],
+  "defaultLanguage": "en",
+  "dbInfo": {
+    "connPool": {
+      "maxIdle": 5000,
+      "maxActive": 5000
+    },
+    "dbServerPort": {
+      "start": 6000,
+      "end": 7000
+    },
+    "dbCheck": {
+      "waitingTime": 10,
+      "retryTimes": 3600
+    }
+  },
+  "logger": {
+    "level": "error",
+    "transports": {
+      "file": {
+        "type": "File",
+        "path": "F:\\VTS_Data"
+      },
+      "console": {
+        "type": "Console"
+      }
+    }
+  }
+}
+

@@ -110,6 +110,9 @@ print(f" Target Instances       : {', '.join([f'Port {p}' for p in sorted(port_d
 print(f" Total Requests Run     : {total_reqs} ({len(all_reads)} Reads, {len(all_writes)} Writes)")
 print(f" Successful (HTTP 200)  : {success_reqs} ({(success_reqs/total_reqs*100) if total_reqs else 0:.1f}%)")
 print(f" Failed / Errors        : {error_reqs} ({(error_reqs/total_reqs*100) if total_reqs else 0:.1f}%)")
+if error_reqs > 0:
+    breakdown = ", ".join([f"HTTP {k}: {v}" for k, v in sorted(status_counts.items()) if k != "200"])
+    print(f" Error Breakdown        : {breakdown}")
 print(f" Overall Throughput     : {rps:.2f} Requests/Second (RPS)")
 print("=" * 86)
 print(f" {'INSTANCE':<14} | {'OP':<6} | {'COUNT':<6} | {'MIN':<6} | {'AVG':<6} | {'p50':<6} | {'p90':<6} | {'p95':<6} | {'p99':<6} | {'MAX':<6}")
