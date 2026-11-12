@@ -77,7 +77,7 @@
     "transports": {
       "file": {
         "type": "File",
-        "path": "/tmp/VTS"
+        "path": "/var/log/vts/vts.log"
       },
       "console": {
         "type": "Console"
