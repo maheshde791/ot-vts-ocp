@@ -1,0 +1,18 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: vts-app1-team-route
+  namespace: lre-vts
+  labels:
+    app: vts-app1-team
+spec:
+  host: vts.apps-crc.testing
+  path: /app1-team
+  to:
+    kind: Service
+    name: vts-app1-team-service
+  port:
+    targetPort: https-web
+  tls:
+    termination: reencrypt
+    insecureEdgeTerminationPolicy: Redirect
