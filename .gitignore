@@ -1,0 +1,5 @@
+# Ignore all certificates, keys, and credentials
+*.crt
+*.key
+*.pem
+containerized_ubuntu_deployment/certs/
