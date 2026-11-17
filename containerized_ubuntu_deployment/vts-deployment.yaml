@@ -48,12 +48,56 @@ spec:
               -subj "/CN=vts.apps-crc.testing" 2>/dev/null || true
           fi
 
-          # 2. Ensure instances.json exists cleanly on the PVC
+          # 2. Non-destructive repair, validation, and persistence of instances.json
           DATA_FILE="/var/lib/OT/OT_VTS/db/data/instances.json"
-          if [ ! -f "$DATA_FILE" ] || [ ! -s "$DATA_FILE" ] || grep -q "null" "$DATA_FILE"; then
-            echo "[]" > "$DATA_FILE" 2>/dev/null || true
-            chmod 664 "$DATA_FILE" 2>/dev/null || true
-          fi
+          BAK_FILE="/var/lib/OT/OT_VTS/db/data/instances.json.bak"
+          DATA_DIR="/var/lib/OT/OT_VTS/db/data"
+
+          mkdir -p "$DATA_DIR"
+          /opt/OT/OT_VTS/web/node -e '
+          const fs = require("fs");
+          const [dataFile, bakFile, dbDir] = process.argv.slice(1);
+
+          let instances = null;
+          // Step A: Parse existing instances.json if present, stripping binary nulls (\0)
+          if (fs.existsSync(dataFile)) {
+            try {
+              let raw = fs.readFileSync(dataFile, "utf8").replace(/\0/g, "").trim();
+              if (raw.length > 0) {
+                let parsed = JSON.parse(raw);
+                if (Array.isArray(parsed)) instances = parsed;
+              }
+            } catch (e) {}
+          }
+          // Step B: If main file unreadable, attempt restoration from clean backup
+          if (!instances && fs.existsSync(bakFile)) {
+            try {
+              let rawBak = fs.readFileSync(bakFile, "utf8").replace(/\0/g, "").trim();
+              if (rawBak.length > 0) {
+                let parsedBak = JSON.parse(rawBak);
+                if (Array.isArray(parsedBak)) instances = parsedBak;
+              }
+            } catch (e) {}
+          }
+          // Step C: Auto-discover existing .vts databases to prevent table loss
+          if (!instances && fs.existsSync(dbDir)) {
+            try {
+              const files = fs.readdirSync(dbDir);
+              const vtsFiles = files.filter(f => f.endsWith(".vts") && f.toLowerCase() !== "default.vts");
+              if (vtsFiles.length > 0) {
+                let port = 2000;
+                instances = vtsFiles.sort().map(f => ({ name: f.replace(/\.vts$/, ""), port: port++, serviceStatus: true }));
+              }
+            } catch (e) {}
+          }
+          // Step D: Initialize empty list only if truly a brand-new installation
+          if (!instances) instances = [];
+          fs.writeFileSync(dataFile, JSON.stringify(instances, null, 2) + "\n", { encoding: "utf8", mode: 0o664 });
+          fs.writeFileSync(bakFile, JSON.stringify(instances, null, 2) + "\n", { encoding: "utf8", mode: 0o664 });
+          ' "$DATA_FILE" "$BAK_FILE" "$DATA_DIR" 2>/dev/null || true
+
+          # Step E: Symlink instances.json so apiserver reads and writes directly to PVC
+          ln -sf "$DATA_FILE" /opt/OT/OT_VTS/web/instances.json
 
           # 3. Configure automatic RDB snapshots every 60s
           sed -i '/^save /d' /opt/OT/OT_VTS/web/redis.conf 2>/dev/null || true
@@ -74,7 +118,11 @@ spec:
               - /bin/bash
               - -c
               - |
-                # Graceful flush hook: save all active Valkey databases to PVC before termination
+                # 1. Backup instances.json before shutdown
+                if [ -s /var/lib/OT/OT_VTS/db/data/instances.json ]; then
+                  cp -f /var/lib/OT/OT_VTS/db/data/instances.json /var/lib/OT/OT_VTS/db/data/instances.json.bak
+                fi
+                # 2. Graceful flush hook: save all active Valkey databases to PVC before termination
                 for pid in $(pgrep valkey-server 2>/dev/null); do
                   PORT=$(cat /proc/$pid/cmdline 2>/dev/null | tr '\0' ' ' | grep -oP '127\.0\.0\.1:\K\d+')
                   if [ -n "$PORT" ]; then
