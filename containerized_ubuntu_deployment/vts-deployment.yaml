@@ -102,13 +102,13 @@ spec:
           sed -i '/^save /d' /opt/OT/OT_VTS/web/redis.conf 2>/dev/null || true
           echo "save 60 1" >> /opt/OT/OT_VTS/web/redis.conf 2>/dev/null || true
 
-          # 4. Start in-container NGINX reverse proxy on port 8443
+          # 5. Start in-container NGINX reverse proxy on port 8443
           nginx
 
-          # 5. Start supervisor daemon in background
+          # 6. Start supervisor daemon in background
           ./api_daemon </dev/null &
 
-          # 6. Keep container alive and track processes
+          # 7. Keep container alive and track processes
           wait -n
         lifecycle:
           preStop:

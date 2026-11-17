@@ -164,11 +164,16 @@ data:
             proxy_send_timeout    60s;
             proxy_read_timeout    60s;
 
+            location ~* /favicon\.ico$ {
+                return 204;
+                access_log off;
+                log_not_found off;
+            }
+
             # ----------------------------------------------------------------------------------
-            # Primary Gateway Ingress Path Handler (Single-Segment Prefix)
-            # Matches: /app1-team, /app1-team/, /app1-team/client_api/get, /any-team/path
+            # Primary Gateway Ingress Path Handler (Matches: /app1-team, /app1-team/, /app2-team, etc.)
             # ----------------------------------------------------------------------------------
-            location ~ ^/(?<team_prefix>app[0-9]+-team|[^/]+)(?<req_path>/.*)?$ {
+            location ~ ^/(?<team_prefix>app[0-9]+-team)(?<req_path>/.*)?$ {
                 # 1. Multi-Instance Query-String routing (ports 4000, 8888, 2000-2050)
                 # Example: https://<domain>/app1-team/?portnumber=2000/client_api/get
                 if ($query_string ~* "^portnumber=(4000|888[89]|889[0-9]|890[0-8]|20[0-4][0-9]|2050)(.*)$") {
@@ -183,17 +188,36 @@ data:
                     return 403;
                 }
 
-                # 3. Native VTS Forwarding:
-                # Strips the team prefix and delivers the native clean path to VTS Admin UI (port 4000)
-                set $target_uri $req_path;
-                if ($target_uri = "") {
-                    set $target_uri "/";
+                # 3. Trailing slash redirect for base path
+                if ($req_path = "") {
+                    return 301 https://$host/$team_prefix/;
                 }
-                proxy_pass http://127.0.0.1:4000$target_uri$is_args$args;
+
+                # 4. Strip team prefix and proxy to VTS native server
+                rewrite ^/[^/]+(/.*)?$ $1 break;
+                proxy_pass http://127.0.0.1:4000;
+
+                # 5. Non-destructive stream transformation for pristine vendor SPA:
+                proxy_http_version   1.1;
+                proxy_set_header     Upgrade $http_upgrade;
+                proxy_set_header     Connection $connection_upgrade;
+                proxy_set_header     Host $host;
+                proxy_set_header     X-Real-IP $remote_addr;
+                proxy_set_header     X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header     X-Forwarded-Proto https;
+                proxy_set_header     Accept-Encoding "";
+                sub_filter '<base href="/">' '<base href="/$team_prefix/">';
+                sub_filter 'this.baseURL=""' 'this.baseURL="/$team_prefix"';
+                sub_filter 'prefix:"/assets/i18n/"' 'prefix:"assets/i18n/"';
+                sub_filter '}/ws`' '}/$team_prefix/ws`';
+                sub_filter 'window.open(o,"_blank")' 'window.open(o.slice(1),"_blank")';
+                sub_filter 'window.open(s,"_blank")' 'window.open(s.slice(1),"_blank")';
+                sub_filter_types application/javascript text/javascript;
+                sub_filter_once off;
             }
 
             # ----------------------------------------------------------------------------------
-            # Fallback Root Handler (Direct internal access without gateway path prefix)
+            # Fallback Root Handler
             # ----------------------------------------------------------------------------------
             location / {
                 if ($query_string ~* "^portnumber=(4000|888[89]|889[0-9]|890[0-8]|20[0-4][0-9]|2050)(.*)$") {
@@ -205,7 +229,7 @@ data:
                 if ($query_string ~* "portnumber=") {
                     return 403;
                 }
-                proxy_pass http://127.0.0.1:4000;
+                return 301 https://$host/app1-team/;
             }
         }
     }
