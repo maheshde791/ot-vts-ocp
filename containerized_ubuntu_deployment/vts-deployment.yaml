@@ -39,12 +39,11 @@ spec:
         - |
           export GIN_MODE=release
 
-          # 1. Generate SSL certificate for in-container NGINX if missing
-          mkdir -p /etc/pki/tls/certs /etc/pki/tls/private
-          if [ ! -f /etc/pki/tls/certs/vts.crt ]; then
+          # 1. Ensure SSL certificate exists for in-container NGINX
+          if [ ! -f /opt/OT/OT_VTS/web/vts.crt ] || [ ! -f /opt/OT/OT_VTS/web/vts.key ]; then
             openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-              -keyout /etc/pki/tls/private/vts.key \
-              -out /etc/pki/tls/certs/vts.crt \
+              -keyout /opt/OT/OT_VTS/web/vts.key \
+              -out /opt/OT/OT_VTS/web/vts.crt \
               -subj "/CN=vts.apps-crc.testing" 2>/dev/null || true
           fi
 
@@ -138,7 +137,7 @@ spec:
           mountPath: /opt/OT/OT_VTS/web/configure.json
           subPath: configure.json
         - name: nginx-mount
-          mountPath: /etc/nginx/conf.d/default.conf
+          mountPath: /etc/nginx/nginx.conf
           subPath: vts-nginx.conf
         - name: vts-db-storage
           mountPath: /var/lib/OT/OT_VTS/db/data
