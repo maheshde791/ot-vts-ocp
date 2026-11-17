@@ -306,7 +306,7 @@ Each instance contains distinct country-coded identifiers (`IND_Cust_*`, `AUS_Cu
 
 ### 7.1 Manifest Inventory
 
-All manifests reside in `/home/mahesh/vts_ocp/containerized_ubuntu_deployment/`:
+All manifests reside in `/home/mahesh/vts_ocp/containerized_ubuntu_deployment_pathbasedRoute/`:
 
 | Manifest File | Kind | Description |
 | :--- | :--- | :--- |
@@ -328,7 +328,7 @@ All manifests reside in `/home/mahesh/vts_ocp/containerized_ubuntu_deployment/`:
 
 Deploy both teams with a single command:
 ```bash
-cd /home/mahesh/vts_ocp/containerized_ubuntu_deployment
+cd /home/mahesh/vts_ocp/containerized_ubuntu_deployment_pathbasedRoute
 ./deploy_vts_app.sh all
 ```
 
