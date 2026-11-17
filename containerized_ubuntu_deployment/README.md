@@ -1,43 +1,49 @@
-# OpenText Virtual Table Server (VTS) 26.1 on OpenShift: Path-Based Multi-Tenancy Architecture & Deployment Guide
+# OpenText Virtual Table Server (VTS) 26.1: Platform Deployment & Infrastructure Specification
 
-This document provides complete technical specifications, architectural designs, deployment instructions, and test engineering integration guidelines for deploying containerized **OpenText Virtual Table Server (VTS) 26.1** on **Red Hat OpenShift / CRC** using **Path-Based Multi-Tenancy**.
+This document provides complete technical specifications, infrastructure designs, container runtime details, and deployment procedures for deploying containerized **OpenText Virtual Table Server (VTS) 26.1** on **Red Hat OpenShift / CRC** using **Path-Based Multi-Tenancy**.
+
+> [!NOTE]
+> For LoadRunner VuGen script integration, cURL query samples, and test data automation, refer to the dedicated [**TESTERS_GUIDE.md**](TESTERS_GUIDE.md).
 
 ---
 
 ## Table of Contents
 
-1. [Executive Summary & Architectural Model](#1-executive-summary--architectural-model)
-2. [Core Architectural Innovations](#2-core-architectural-innovations)
-   - [Zero-Disk Vendor Modification Principle](#21-zero-disk-vendor-modification-principle)
-   - [In-Container NGINX Reverse Proxy & Stream Transformation](#22-in-container-nginx-reverse-proxy--stream-transformation)
-   - [Gorilla WebSocket Upgrade & Connection Header Handling](#23-gorilla-websocket-upgrade--connection-header-handling)
-   - [Relative Navigation Stream Rewriting for Angular SPA](#24-relative-navigation-stream-rewriting-for-angular-spa)
-   - [SSRF Mitigation & Internal Valkey Port Protection](#25-ssrf-mitigation--internal-valkey-port-protection)
-3. [Persistent Storage & Multi-Instance Engine Architecture](#3-persistent-storage--multi-instance-engine-architecture)
-   - [Storage Architecture & Symlink Bootstrapping](#31-storage-architecture--symlink-bootstrapping)
-   - [Multi-Instance Port Forwarding & Valkey Allocation](#32-multi-instance-port-forwarding--valkey-allocation)
-   - [Graceful Shutdown & Data Persistence Life Cycle](#33-graceful-shutdown--data-persistence-life-cycle)
-4. [Deployment Verification & Multi-Tenant Data Validation](#4-deployment-verification--multi-tenant-data-validation)
-   - [Multi-Instance Scale: 20 Instances per Pod](#41-multi-instance-scale-20-instances-per-pod)
-   - [High-Scale Data Population: 100,000 Records per Team](#42-high-scale-data-population-100000-records-per-team)
-   - [Cold Pod Recreate & Cross-Tenant Isolation Results](#43-cold-pod-recreate--cross-tenant-isolation-results)
-5. [LoadRunner VuGen & Load Generator (LG) Integration](#5-loadrunner-vugen--load-generator-lg-integration)
-   - [Approach 1: Transparent Drop-In Header (`vts_lrvtc.h`) — Recommended](#51-approach-1-transparent-drop-in-header-vts_lrvtch--recommended)
-   - [Approach 2: VuGen REST API Integration (`web_custom_request`)](#52-approach-2-vugen-rest-api-integration-web_custom_request)
-   - [Approach 3: Native `lrvtc_connect_ex` with Dedicated Hostnames](#53-approach-3-native-lrvtc_connect_ex-with-dedicated-hostnames)
-6. [Complete REST API Reference](#6-complete-rest-api-reference)
-7. [Deployment Instructions & Operational Runbook](#7-deployment-instructions--operational-runbook)
-   - [File Manifest](#71-file-manifest)
-   - [Automated Deployment Execution](#72-automated-deployment-execution)
-   - [Verification Commands](#73-verification-commands)
+1. [Architectural Overview](#1-architectural-overview)
+2. [Container OS, User & Permission Model](#2-container-os-user--permission-model)
+   - [Base Image & OS Environment](#21-base-image--os-environment)
+   - [User & Group Matrix (vts_user & NGINX)](#22-user--group-matrix-vts_user--nginx)
+   - [OpenShift Security Context Constraints (SCC) & fsGroup](#23-openshift-security-context-constraints-scc--fsgroup)
+3. [Filesystem Layout, Mounts & Permissions](#3-filesystem-layout-mounts--permissions)
+   - [Binary & Application Root Paths](#31-binary--application-root-paths)
+   - [ConfigMap SubPath Volume Mounts](#32-configmap-subpath-volume-mounts)
+   - [Persistent Storage (PVC) & Data Directory](#33-persistent-storage-pvc--data-directory)
+   - [Non-Destructive Symlink Architecture for instances.json](#34-non-destructive-symlink-architecture-for-instancesjson)
+4. [Process Architecture & Supervisor Daemon](#4-process-architecture--supervisor-daemon)
+   - [Process Tree & Execution Flow](#41-process-tree--execution-flow)
+   - [Supervisor Daemon (api_daemon)](#42-supervisor-daemon-api_daemon)
+   - [Internal Database Engine (Valkey)](#43-internal-database-engine-valkey)
+   - [Graceful Shutdown (preStop Lifecycle Hook)](#44-graceful-shutdown-prestop-lifecycle-hook)
+5. [Network, Ingress & Port Matrix](#5-network-ingress--port-matrix)
+   - [Port Allocation Architecture](#51-port-allocation-architecture)
+   - [In-Container NGINX Reverse Proxy (Port 8443)](#52-in-container-nginx-reverse-proxy-port-8443)
+   - [In-Flight Stream Transformations (sub_filter)](#53-in-flight-stream-transformations-sub_filter)
+   - [Gorilla WebSocket Upgrade & Connection Header Handling](#54-gorilla-websocket-upgrade--connection-header-handling)
+   - [SSRF Mitigation & Port Guardrails](#55-ssrf-mitigation--port-guardrails)
+6. [Multi-Tenant Deployment & Scale Validation](#6-multi-tenant-deployment--scale-validation)
+   - [Dual-Pod Tenant Isolation (app1-team & app2-team)](#61-dual-pod-tenant-isolation-app1-team--app2-team)
+   - [20 Active Instances & 100k Records per Team](#62-20-active-instances--100k-records-per-team)
+   - [Cold Pod Recreate & Crash Recovery Verification](#63-cold-pod-recreate--crash-recovery-verification)
+7. [Deployment Playbook & Manifest Reference](#7-deployment-playbook--manifest-reference)
+   - [Manifest Inventory](#71-manifest-inventory)
+   - [Automated Deployment (deploy_vts_app.sh)](#72-automated-deployment-deploy_vts_appsh)
+   - [Infrastructure Verification Commands](#73-infrastructure-verification-commands)
 
 ---
 
-## 1. Executive Summary & Architectural Model
+## 1. Architectural Overview
 
-Enterprise performance testing teams often require isolated test data repositories across multiple independent application teams (`app1-team`, `app2-team`) while leveraging a **single shared ingress DNS domain** (e.g., `https://vts.apps-crc.testing`).
-
-The official OpenText VTS container image (`performancetesting/opentext_vts_linux_ubuntu:26.1`) is designed exclusively for single-tenant, root-path (`/`) hosting with direct port exposure. This deployment achieves **Path-Based Multi-Tenancy** under a unified domain without altering the vendor image:
+The deployment enables dual-tenant hosting on OpenShift under a single shared Fully Qualified Domain Name (`https://vts.apps-crc.testing`) with zero modifications to vendor files on disk:
 
 ```
                                   +---------------------------------------+
@@ -64,358 +70,294 @@ The official OpenText VTS container image (`performancetesting/opentext_vts_linu
          +-------------------------------+                         +-------------------------------+
 ```
 
-### Key Architectural Metrics:
+---
 
-| Dimension | Specification |
-| :--- | :--- |
-| **Vendor Container Image** | `performancetesting/opentext_vts_linux_ubuntu:26.1` (100% Pristine) |
-| **Shared Domain** | `vts.apps-crc.testing` |
-| **Tenant Ingress Subpaths** | `/app1-team/` and `/app2-team/` |
-| **Active Instances per Pod** | 20 instances (Port `8888` + Ports `2000`–`2018`) |
-| **Data Capacity per Pod** | 100,000 records (5,000 rows $\times$ 10 columns $\times$ 20 tables) |
-| **Internal Database Engine** | Valkey (Redis-compatible in-memory data store with disk persistence) |
-| **Storage Architecture** | Red Hat OpenShift CSI Block/File PersistentVolumeClaim (10 GiB RWO) |
-| **Security & Auth** | RBAC Basic Authentication (`vtsadmin:*****`) + End-to-End Re-encrypt TLS |
+## 2. Container OS, User & Permission Model
+
+### 2.1 Base Image & OS Environment
+* **Container Image:** `performancetesting/opentext_vts_linux_ubuntu:26.1`
+* **Underlying OS:** Ubuntu 22.04 LTS (Jammy Jellyfish) x86_64
+* **C Run-time & Libraries:** Glibc 2.35, OpenSSL 3.0.2
+
+### 2.2 User & Group Matrix (vts_user & NGINX)
+OpenShift enforces strict unprivileged user policies (Restricted SCC). The container is engineered to run without root privileges:
+
+| User / Group | UID / GID | Component | Purpose | Permissions |
+| :--- | :--- | :--- | :--- | :--- |
+| **`vts_user`** | `54345` / `54345` | VTS Binaries (`apiserver`, `api_daemon`, `valkey-server`) | Runs internal VTS application processes | Owner of `/opt/OT/OT_VTS/web` and `/var/lib/OT/OT_VTS/db/data` |
+| **`nginx`** | Runs as current pod UID (`54345` / Arbitrary) | In-Container NGINX | Listens on port `8443`, writes PID to `/tmp/nginx.pid` and logs to `/tmp/nginx_error.log` | Unprivileged non-root execution |
+| **`root`** | `0` / `0` | Base OS (Build-time only) | Installed system packages during image creation | Zero runtime root privileges required |
+
+### 2.3 OpenShift Security Context Constraints (SCC) & fsGroup
+To ensure persistent storage volumes attached via OpenShift CSI drivers are writable by `vts_user`, the Deployment specifies:
+
+```yaml
+spec:
+  template:
+    spec:
+      securityContext:
+        fsGroup: 54345 # Matches vts_user group ID
+```
+When OpenShift mounts the PersistentVolumeClaim at `/var/lib/OT/OT_VTS/db/data`, it recursively chowns the volume mount to GID `54345`, ensuring seamless read/write access for Valkey databases and `instances.json`.
 
 ---
 
-## 2. Core Architectural Innovations
+## 3. Filesystem Layout, Mounts & Permissions
 
-### 2.1 Zero-Disk Vendor Modification Principle
-To guarantee vendor compliance and seamless future container updates, **zero vendor application files on disk are modified**. All root paths, Angular single-page application (SPA) base tags, WebSocket URIs, and instance navigation URLs are transformed dynamically in-flight using NGINX stream filters (`sub_filter`).
+### 3.1 Binary & Application Root Paths
 
-### 2.2 In-Container NGINX Reverse Proxy & Stream Transformation
-The container runs an unprivileged NGINX reverse-proxy on port `8443` fronting VTS services (`4000`, `8888`, `2000–2050`). 
-
-When traffic enters through OpenShift with the team prefix (e.g., `/app1-team/`), NGINX performs the following runtime stream substitutions:
-
-```nginx
-# Non-destructive stream transformation for pristine vendor SPA
-sub_filter '<base href="/">' '<base href="/$team_prefix/">';
-sub_filter 'this.baseURL=""' 'this.baseURL="/$team_prefix"';
-sub_filter 'prefix:"/assets/i18n/"' 'prefix:"assets/i18n/"';
-sub_filter '}/ws`' '}/$team_prefix/ws`';
-sub_filter 'window.open(o,"_blank")' 'window.open(o.slice(1),"_blank")';
-sub_filter 'window.open(s,"_blank")' 'window.open(s.slice(1),"_blank")';
-sub_filter_types application/javascript text/javascript;
-sub_filter_once off;
+```
+/opt/OT/OT_VTS/
+|-- bin/
+|   |-- vts_export.sh           # CLI database export utility
+|   `-- vts_import.sh           # CLI database import utility
+|-- samples/                    # Default sample CSVs
+`-- web/                        # Working Directory (/opt/OT/OT_VTS/web)
+    |-- api_daemon              # VTS supervisor daemon (ELF 64-bit LSB executable)
+    |-- apiserver               # Main VTS REST/Go web server (Gin framework)
+    |-- cmdHandler              # Command execution handler
+    |-- configure.json          # Mounted from ConfigMap (RBAC & port configuration)
+    |-- dist/browser/           # Angular SPA compiled static assets
+    |-- instances.json          # Symlink -> /var/lib/OT/OT_VTS/db/data/instances.json
+    |-- node                    # Standalone Node.js v20.x binary runtime
+    |-- redis.conf              # Valkey configuration template (RDB snapshot rules)
+    |-- valkey-server           # Valkey in-memory storage engine
+    |-- valkey-cli              # Valkey command-line tool
+    |-- vts.crt                 # In-container SSL certificate
+    `-- vts.key                 # In-container SSL private key
 ```
 
-### 2.3 Gorilla WebSocket Upgrade & Connection Header Handling
-VTS uses the Go Gorilla WebSocket library on port `4000/ws` for real-time table grid updates. When applying `sub_filter`, NGINX requires `proxy_set_header Accept-Encoding "";` to prevent upstream gzip compression.
+### 3.2 ConfigMap SubPath Volume Mounts
+To maintain the official vendor image 100% pristine, configuration files are injected via Kubernetes `subPath` mounts:
 
-> [!WARNING]
-> In NGINX, declaring any `proxy_set_header` inside a child `location` block wipes out all inherited `proxy_set_header` directives from the parent `server` block.
+1. **VTS Core Configuration (`configure.json`):**
+   - Source: ConfigMap `vts-app1-config` (key: `configure.json`)
+   - Target: `/opt/OT/OT_VTS/web/configure.json`
+   - Content: VTS 26.1 RBAC definitions (`vtsadmin:*****`), Valkey port range (`10000–30000`), connection pool settings.
+2. **NGINX Reverse Proxy Configuration (`vts-nginx.conf`):**
+   - Source: ConfigMap `vts-app1-config` (key: `vts-nginx.conf`)
+   - Target: `/etc/nginx/nginx.conf`
+   - Content: TLS 1.2/1.3 reverse-proxy on port `8443`, path-stripping rules, Angular stream rewrite filters.
 
-To prevent dropping WebSocket handshakes (`400 Bad Request` / UI showing `Disconnected`), the WebSocket upgrade headers are explicitly declared directly inside the child location block:
+### 3.3 Persistent Storage (PVC) & Data Directory
+- **Mount Path:** `/var/lib/OT/OT_VTS/db/data`
+- **Volume Claim:** `vts-app1-data-pvc` (10 GiB RWO, ReadWriteOnce)
+- **Persisted Assets:**
+  - `instances.json` (metadata of all configured instances and ports)
+  - `instances.json.bak` (automatic backup created during boot and shutdown)
+  - `Default.vts`, `Instance_1.vts`, ..., `Instance_19.vts` (Valkey RDB dump files)
+
+### 3.4 Non-Destructive Symlink Architecture for `instances.json`
+VTS hardcodes instance metadata reading and writing to `/opt/OT/OT_VTS/web/instances.json`. Because `/opt/OT/OT_VTS/web` is container-ephemeral, container recreations would lose all instance configurations.
+
+The deployment entrypoint resolves this with automated self-healing symlink bootstrapping:
+```bash
+# 1. Verify persistent storage directory exists
+mkdir -p /var/lib/OT/OT_VTS/db/data
+
+# 2. Inspect persistent instances.json via embedded Node runtime:
+#    - Strips binary null bytes (\0) if corrupted by an unclean kernel kill
+#    - Restores from instances.json.bak if unreadable
+#    - Auto-discovers existing *.vts database files to re-register lost instances
+#    - Seeds Default instance (port 8888) only on a fresh empty volume
+/opt/OT/OT_VTS/web/node -e '<repair_and_validation_script>' ...
+
+# 3. Create atomic symlink from container path to persistent storage
+ln -sf /var/lib/OT/OT_VTS/db/data/instances.json /opt/OT/OT_VTS/web/instances.json
+```
+
+---
+
+## 4. Process Architecture & Supervisor Daemon
+
+### 4.1 Process Tree & Execution Flow
+Inside the running pod, processes operate in a strictly coordinated tree:
+
+```
+[PID 1] /bin/bash (Entrypoint script)
+  |-- [PID 13-19] nginx: master & worker processes (Listening on 0.0.0.0:8443)
+  |-- [PID 24]    ./api_daemon (VTS Supervisor)
+  |     |-- [PID 25]  ./apiserver (Listens on 4000, 8888, 2000-2018)
+  |     |-- [PID 31]  ./valkey-server 127.0.0.1:14937 (Default Table DB)
+  |     |-- [PID 42]  ./valkey-server 127.0.0.1:27980 (Instance_1 DB)
+  |     `-- [PID ...] ./valkey-server 127.0.0.1:XXXXX (Instances 2-19 DBs)
+  `-- wait -n (Keeps container alive; terminates if any critical process dies)
+```
+
+### 4.2 Supervisor Daemon (`api_daemon`)
+* `api_daemon` is OpenText's internal process manager.
+* It monitors `apiserver` and automatically spawns individual `valkey-server` instances whenever a table instance is enabled.
+* If a Valkey instance crashes, `api_daemon` detects the exit and restarts the process against its persisted `.vts` data file.
+
+### 4.3 Internal Database Engine (Valkey)
+* OpenText VTS 26.1 replaced legacy SQLite/internal engines with **Valkey** (a high-performance, Redis-compatible in-memory key-value data store).
+* Tables are stored in memory for microsecond query latency, with background asynchronous snapshots (`BGSAVE`) configured via `redis.conf`:
+  ```
+  save 60 1  # Save to disk every 60 seconds if at least 1 key changed
+  ```
+
+### 4.4 Graceful Shutdown (`preStop` Lifecycle Hook)
+When Kubernetes terminates a pod (e.g., node drain, rollout, or scaling), it issues a `SIGTERM` followed by `SIGKILL` after `terminationGracePeriodSeconds` (default: 30s).
+
+To prevent data corruption, a `preStop` container lifecycle hook executes synchronously before termination:
+1. Copies `/var/lib/OT/OT_VTS/db/data/instances.json` to `.bak`.
+2. Iterates across all active `valkey-server` PIDs, identifies their local loopback ports, and sends an explicit `/opt/OT/OT_VTS/web/valkey-cli -p <PORT> save` command to flush all in-memory tables directly to persistent disk.
+3. Issues `sync` to guarantee filesystem buffer flushing to underlying block storage.
+
+---
+
+## 5. Network, Ingress & Port Matrix
+
+### 5.1 Port Allocation Architecture
+
+| Layer | Port | Protocol | Scope | Purpose |
+| :--- | :--- | :--- | :--- | :--- |
+| **Ingress Router** | `443` | HTTPS (TLS 1.2/1.3) | Public / LG Facing | External endpoint on `vts.apps-crc.testing` |
+| **Kubernetes Service** | `443` $\rightarrow$ `8443` | TCP (ClusterIP) | Cluster-Internal | Internal service proxying to pod NGINX |
+| **In-Container NGINX** | `8443` | HTTPS (HTTP/2) | Pod-Internal | SSL termination, path stripping, and SPA stream rewriting |
+| **VTS Admin Web UI** | `4000` | HTTP / WebSocket | `127.0.0.1` | Management console and Gorilla WebSocket endpoint (`/ws`) |
+| **Default Table API** | `8888` | HTTP | `127.0.0.1` | Data query/update API for Default instance |
+| **Custom Tables** | `2000`–`2018` | HTTP | `127.0.0.1` | Data query/update APIs for custom instances 1 through 19 |
+| **Valkey Storage Engines**| `10000`–`30000` | Valkey Protocol | `127.0.0.1` | Internal DB engines (blocked from external ingress via NGINX) |
+
+### 5.2 In-Container NGINX Reverse Proxy (Port 8443)
+OpenShift Routes use **Re-encrypt** TLS termination:
+- Outer leg: Clients connect to OpenShift Router over HTTPS on port 443.
+- Inner leg: OpenShift Router re-encrypts traffic to the backend Pod over HTTPS on port `8443`, validating the pod's certificate against the destination CA certificate (`certs/vts-backend-ca.crt`).
+
+### 5.3 In-Flight Stream Transformations (`sub_filter`)
+The NGINX configuration strips the team subpath and dynamically patches the compiled Angular Single Page Application (SPA) in real time:
+
+```nginx
+location ~ ^/(?<team_prefix>app[0-9]+-team)(?<req_path>/.*)?$ {
+    # 1. Multi-Instance Query-String routing (ports 4000, 8888, 2000-2050)
+    if ($query_string ~* "^portnumber=(4000|888[89]|889[0-9]|890[0-8]|20[0-4][0-9]|2050)(.*)$") {
+        set $inst_port $1;
+        set $inst_param $2;
+        proxy_pass http://127.0.0.1:$inst_port$inst_param;
+        break;
+    }
+
+    # 2. Strip team prefix and proxy to VTS native server
+    rewrite ^/[^/]+(/.*)?$ $1 break;
+    proxy_pass http://127.0.0.1:4000;
+
+    # 3. Stream filters patching vendor Angular SPA
+    sub_filter '<base href="/">' '<base href="/$team_prefix/">';
+    sub_filter 'this.baseURL=""' 'this.baseURL="/$team_prefix"';
+    sub_filter 'prefix:"/assets/i18n/"' 'prefix:"assets/i18n/"';
+    sub_filter '}/ws`' '}/$team_prefix/ws`';
+    sub_filter 'window.open(o,"_blank")' 'window.open(o.slice(1),"_blank")';
+    sub_filter 'window.open(s,"_blank")' 'window.open(s.slice(1),"_blank")';
+    sub_filter_types application/javascript text/javascript;
+    sub_filter_once off;
+}
+```
+
+### 5.4 Gorilla WebSocket Upgrade & Connection Header Handling
+When using `sub_filter`, NGINX disables gzip with `proxy_set_header Accept-Encoding "";`. 
+In NGINX, declaring `proxy_set_header` in a location block wipes out all inherited headers from parent blocks.
+
+To prevent the Gorilla WebSocket on port 4000 from failing with `400 Bad Request` (UI showing `Disconnected`), the upgrade headers are explicitly declared directly inside the location block:
 ```nginx
 proxy_set_header Upgrade $http_upgrade;
 proxy_set_header Connection $connection_upgrade;
 ```
 
-### 2.4 Relative Navigation Stream Rewriting for Angular SPA
-When an operator navigates to another VTS instance from the UI drop-down ("Other Instances"), the compiled Angular SPA invokes `window.open(this.router.serializeUrl(n), "_blank")`, emitting an absolute path `"/ ?port=2000"`. 
-
-The leading slash would force browsers to jump to the root domain (`https://vts.apps-crc.testing/?port=2000`), escaping the team path and causing HTTP 404 errors. 
-
-NGINX in-flight stream rewriting transforms this dynamically:
+### 5.5 SSRF Mitigation & Port Guardrails
+Direct external access to internal Valkey database engine ports (`10000–30000`) is strictly blocked by NGINX:
 ```nginx
-sub_filter 'window.open(o,"_blank")' 'window.open(o.slice(1),"_blank")';
-```
-This converts the target to a relative URL `"?port=2000"`, keeping the browser securely inside `https://vts.apps-crc.testing/app1-team/?port=2000`.
-
-### 2.5 SSRF Mitigation & Internal Valkey Port Protection
-Each active VTS table instance dynamically provisions an internal Valkey process on ports between `10000` and `30000`. 
-
-NGINX enforces strict Server-Side Request Forgery (SSRF) controls:
-```nginx
-# 1. Allow strictly authorized API ports: 4000, 8888, 2000-2050
-if ($query_string ~* "^portnumber=(4000|888[89]|889[0-9]|890[0-8]|20[0-4][0-9]|2050)(.*)$") {
-    set $inst_port $1;
-    set $inst_param $2;
-    proxy_pass http://127.0.0.1:$inst_port$inst_param;
-    break;
-}
-
-# 2. Block any attempt targeting internal Valkey storage engines
 if ($query_string ~* "portnumber=") {
     return 403;
 }
 ```
+Only authorized application ports (`4000`, `8888`, and `2000–2050`) are forwarded.
 
 ---
 
-## 3. Persistent Storage & Multi-Instance Engine Architecture
+## 6. Multi-Tenant Deployment & Scale Validation
 
-### 3.1 Storage Architecture & Symlink Bootstrapping
-VTS maintains instance definitions in `/opt/OT/OT_VTS/web/instances.json` and database files in `/var/lib/OT/OT_VTS/db/data`. In containerized environments without persistence, terminating a pod wipes all custom table instances.
+### 6.1 Dual-Pod Tenant Isolation (`app1-team` & `app2-team`)
+The namespace `lre-vts` hosts two independent single-pod stateful workloads:
+- **`vts-app1-team`:** Accessible at `https://vts.apps-crc.testing/app1-team/`
+- **`vts-app2-team`:** Accessible at `https://vts.apps-crc.testing/app2-team/`
 
-To resolve this:
-1. A 10 GiB PVC is mounted at `/var/lib/OT/OT_VTS/db/data`.
-2. On pod initialization, an automatic bootstrapping script inspects `/var/lib/OT/OT_VTS/db/data/instances.json`:
-   - If missing or empty, it seeds the initial default instance.
-   - If present, it verifies JSON validity.
-3. The script creates an atomic symlink from `/opt/OT/OT_VTS/web/instances.json` pointing to the persistent storage file.
+Each pod possesses its own independent PVC (`vts-app1-data-pvc` and `vts-app2-data-pvc`), ensuring complete data and process isolation.
 
+### 6.2 20 Active Instances & 100k Records per Team
+Both pods were initialized with 20 concurrent table instances:
+- **Default (8888):** 5,000 records
+- **Instance_1 through Instance_19 (2000–2018):** 5,000 records each
+- **Total Capacity:** 100,000 records per pod (**200,000 records total across both pods**).
+
+Each instance contains distinct country-coded identifiers (`IND_Cust_*`, `AUS_Cust_*`, ..., `BRA_Cust_*` for `app1-team`; `APP2_IND_Cust_*`, `APP2_AUS_Cust_*`, ..., `APP2_BRA_Cust_*` for `app2-team`).
+
+### 6.3 Cold Pod Recreate & Crash Recovery Verification
+- Both pods were hard-deleted (`oc delete pod`).
+- Replacement pods mounted the persistent volumes, auto-symlinked `instances.json`, and started all 20 database engines.
+- Automated verification confirmed:
+  - 100% of rows preserved across all 40 tables.
+  - Zero data swapping between `app1-team` and `app2-team`.
+  - Zero corruption in `instances.json`.
+
+---
+
+## 7. Deployment Playbook & Manifest Reference
+
+### 7.1 Manifest Inventory
+
+All manifests reside in `/home/mahesh/vts_ocp/containerized_ubuntu_deployment/`:
+
+| Manifest File | Kind | Description |
+| :--- | :--- | :--- |
+| [`deploy_vts_app.sh`](deploy_vts_app.sh) | Shell Script | Automated deployer supporting `app1`, `app2`, or `all` |
+| [`vts-pvc.yaml`](vts-pvc.yaml) | PersistentVolumeClaim | 10 GiB RWO storage for App1 Team |
+| [`vts-configmap.yaml`](vts-configmap.yaml) | ConfigMap | `configure.json` (RBAC) & NGINX reverse-proxy for App1 Team |
+| [`vts-deployment.yaml`](vts-deployment.yaml) | Deployment | Single-pod stateful workload with auto-symlink for App1 Team |
+| [`vts-service.yaml`](vts-service.yaml) | Service | ClusterIP exposing port `443` $\rightarrow$ `8443` for App1 Team |
+| [`vts-route.yaml`](vts-route.yaml) | Route | OpenShift Re-encrypt route on `/app1-team` for App1 Team |
+| [`vts-app2-pvc.yaml`](vts-app2-pvc.yaml) | PersistentVolumeClaim | 10 GiB RWO storage for App2 Team |
+| [`vts-app2-configmap.yaml`](vts-app2-configmap.yaml) | ConfigMap | `configure.json` (RBAC) & NGINX reverse-proxy for App2 Team |
+| [`vts-app2-deployment.yaml`](vts-app2-deployment.yaml) | Deployment | Single-pod stateful workload with auto-symlink for App2 Team |
+| [`vts-app2-service.yaml`](vts-app2-service.yaml) | Service | ClusterIP exposing port `443` $\rightarrow$ `8443` for App2 Team |
+| [`vts-app2-route.yaml`](vts-app2-route.yaml) | Route | OpenShift Re-encrypt route on `/app2-team` for App2 Team |
+| [`vts_lrvtc.h`](vts_lrvtc.h) | C Header | VuGen compatibility header for LoadRunner test scripts |
+| [`TESTERS_GUIDE.md`](TESTERS_GUIDE.md) | Markdown | Test engineering, cURL queries, and VuGen integration guide |
+
+### 7.2 Automated Deployment (`deploy_vts_app.sh`)
+
+Deploy both teams with a single command:
 ```bash
-# Entrypoint initialization script inside vts-deployment.yaml
-if [ ! -f /var/lib/OT/OT_VTS/db/data/instances.json ] || [ ! -s /var/lib/OT/OT_VTS/db/data/instances.json ]; then
-    echo '[{"name":"Default","port":8888,"serviceStatus":true}]' > /var/lib/OT/OT_VTS/db/data/instances.json
-fi
-ln -sf /var/lib/OT/OT_VTS/db/data/instances.json /opt/OT/OT_VTS/web/instances.json
-```
-
-### 3.2 Multi-Instance Port Forwarding & Valkey Allocation
-* **Default Table:** Port `8888` (API access) backed by Valkey port allocated from pool `10000-30000`.
-* **Custom Tables (Instance_1 through Instance_19):** Ports `2000` through `2018`.
-* **Admin Web UI:** Port `4000`.
-* **In-Container NGINX:** Port `8443` (TLS 1.2 / TLS 1.3).
-
-### 3.3 Graceful Shutdown & Data Persistence Life Cycle
-Valkey periodically dumps memory to disk (`dump.rdb` / AOF). When Kubernetes sends `SIGTERM`, processes may terminate before in-memory writes are committed.
-
-A `preStop` container lifecycle hook triggers synchronous disk flushing before pod termination:
-```yaml
-lifecycle:
-  preStop:
-    exec:
-      command:
-        - /bin/bash
-        - -c
-        - |
-          # Flush all active Valkey database instances to disk
-          for pid in $(pgrep valkey-server); do
-            port=$(ss -tlpn | grep "pid=${pid}," | awk '{print $4}' | awk -F: '{print $NF}')
-            if [ -n "${port}" ]; then
-              /opt/OT/OT_VTS/web/valkey-cli -p "${port}" save 2>/dev/null || true
-            fi
-          done
-          sync
-          sleep 2
-```
-
----
-
-## 4. Deployment Verification & Multi-Tenant Data Validation
-
-### 4.1 Multi-Instance Scale: 20 Instances per Pod
-Both `vts-app1-team` and `vts-app2-team` pods were initialized with 20 concurrent table instances:
-- **Port 8888:** `Default`
-- **Port 2000–2018:** `Instance_1` through `Instance_19`
-
-### 4.2 High-Scale Data Population: 100,000 Records per Team
-Each table was populated with **5,000 records** across **10 schema columns** ($5,000 \times 20 = 100,000$ records per pod; **200,000 records total across both pods**).
-
-To guarantee strict tenant and instance isolation, each table was injected with unique country-coded identifiers:
-
-| Port | Instance Name | App1 Team Prefix | App2 Team Prefix | Total Records |
-| :--- | :--- | :--- | :--- | :--- |
-| **8888** | Default | `IND_Cust_1` .. `5000` | `APP2_IND_Cust_1` .. `5000` | 5,000 |
-| **2000** | Instance_1 | `AUS_Cust_1` .. `5000` | `APP2_AUS_Cust_1` .. `5000` | 5,000 |
-| **2001** | Instance_2 | `USA_Cust_1` .. `5000` | `APP2_USA_Cust_1` .. `5000` | 5,000 |
-| **2002** | Instance_3 | `GBR_Cust_1` .. `5000` | `APP2_GBR_Cust_1` .. `5000` | 5,000 |
-| **2003** | Instance_4 | `CAN_Cust_1` .. `5000` | `APP2_CAN_Cust_1` .. `5000` | 5,000 |
-| **2004** | Instance_5 | `DEU_Cust_1` .. `5000` | `APP2_DEU_Cust_1` .. `5000` | 5,000 |
-| **2005** | Instance_6 | `FRA_Cust_1` .. `5000` | `APP2_FRA_Cust_1` .. `5000` | 5,000 |
-| **2006** | Instance_7 | `JPN_Cust_1` .. `5000` | `APP2_JPN_Cust_1` .. `5000` | 5,000 |
-| **2007** | Instance_8 | `SGP_Cust_1` .. `5000` | `APP2_SGP_Cust_1` .. `5000` | 5,000 |
-| **2008** | Instance_9 | `NZL_Cust_1` .. `5000` | `APP2_NZL_Cust_1` .. `5000` | 5,000 |
-| **2009** | Instance_10 | `IRL_Cust_1` .. `5000` | `APP2_IRL_Cust_1` .. `5000` | 5,000 |
-| **2010** | Instance_11 | `CHE_Cust_1` .. `5000` | `APP2_CHE_Cust_1` .. `5000` | 5,000 |
-| **2011** | Instance_12 | `NLD_Cust_1` .. `5000` | `APP2_NLD_Cust_1` .. `5000` | 5,000 |
-| **2012** | Instance_13 | `SWE_Cust_1` .. `5000` | `APP2_SWE_Cust_1` .. `5000` | 5,000 |
-| **2013** | Instance_14 | `NOR_Cust_1` .. `5000` | `APP2_NOR_Cust_1` .. `5000` | 5,000 |
-| **2014** | Instance_15 | `DNK_Cust_1` .. `5000` | `APP2_DNK_Cust_1` .. `5000` | 5,000 |
-| **2015** | Instance_16 | `FIN_Cust_1` .. `5000` | `APP2_FIN_Cust_1` .. `5000` | 5,000 |
-| **2016** | Instance_17 | `ESP_Cust_1` .. `5000` | `APP2_ESP_Cust_1` .. `5000` | 5,000 |
-| **2017** | Instance_18 | `ITA_Cust_1` .. `5000` | `APP2_ITA_Cust_1` .. `5000` | 5,000 |
-| **2018** | Instance_19 | `BRA_Cust_1` .. `5000` | `APP2_BRA_Cust_1` .. `5000` | 5,000 |
-
-### 4.3 Cold Pod Recreate & Cross-Tenant Isolation Results
-1. Both pods (`vts-app1-team` and `vts-app2-team`) were terminated via `oc delete pod`.
-2. Fresh pods spawned, attached the persistent volumes, read the symlinked `instances.json`, and initialized all 20 database engines.
-3. Automated verification script scanned all 20 tables on both pods:
-   - **`app1-team`:** 100% of rows matched expected country identifiers (`IND`, `AUS`, ..., `BRA`).
-   - **`app2-team`:** 100% of rows matched expected prefixed identifiers (`APP2_IND`, `APP2_AUS`, ..., `APP2_BRA`).
-   - **Cross-tenant query test:** Querying port 2004 on `app1-team` returned `DEU_Cust_1` while querying port 2004 on `app2-team` returned `APP2_DEU_Cust_1`. **Zero data swapping or leakage.**
-
----
-
-## 5. LoadRunner VuGen & Load Generator (LG) Integration
-
-LoadRunner performance testing scripts running on distributed Load Generators (LGs) need to query and update VTS data. 
-
-### 5.1 Approach 1: Transparent Drop-In Header (`vts_lrvtc.h`) — Recommended
-This approach allows testing teams to keep **100% of their existing `lrvtc_*` methods** with **zero changes to `Action.c`**.
-
-#### How it works:
-1. Copy [`vts_lrvtc.h`](vts_lrvtc.h) into the VuGen script directory.
-2. In `globals.h`, add: `#include "vts_lrvtc.h"`.
-3. In `vuser_init.c`:
-   ```c
-   vuser_init()
-   {
-       // Connects to App1 or App2 pod over HTTPS with Basic Auth
-       lrvtc_connect("vts.apps-crc.testing/app1-team", 8888, 0);
-       return 0;
-   }
-   ```
-4. In `Action.c` (**Unchanged existing script code**):
-   ```c
-   Action()
-   {
-       int iteration = lr_get_iteration();
-
-       // Native lrvtc_query_row automatically populates {Customer_Code}, {Status}, etc.
-       lrvtc_query_row(iteration);
-       lr_output_message("Customer Code: %s", lr_eval_string("{Customer_Code}"));
-
-       // Native lrvtc_update_message
-       lrvtc_update_message("Status", iteration, "PROCESSED_BY_LG");
-
-       // Native lrvtc_retrieve_message (FIFO queue pop)
-       lrvtc_retrieve_message("Batch_ID");
-
-       return 0;
-   }
-
-   vuser_end()
-   {
-       lrvtc_disconnect();
-       return 0;
-   }
-   ```
-
-### 5.2 Approach 2: VuGen REST API Integration (`web_custom_request`)
-For microservice-style testing or protocols without C runtime hooks (e.g., DevWeb, TruClient Web):
-
-```c
-Action()
-{
-    web_add_auto_header("Authorization", "Basic dnRzYWRtaW46KioqKio=");
-    web_add_auto_header("Content-Type", "application/json");
-
-    // Fetch cell from App1 Team (Port 8888, Row 1)
-    web_reg_save_param_json(
-        "ParamName=CustCode",
-        "QueryString=$[0]",
-        LAST);
-
-    web_custom_request("VTS_Fetch_Customer",
-        "URL=https://vts.apps-crc.testing/app1-team/proxy/8888/client_api/getColumnRange",
-        "Method=POST",
-        "Body={\"column\":\"Customer_Code\",\"start\":1,\"end\":1}",
-        LAST);
-
-    lr_output_message("Fetched Customer: %s", lr_eval_string("{CustCode}"));
-    return 0;
-}
-```
-
-### 5.3 Approach 3: Native `lrvtc_connect_ex` with Dedicated Hostnames
-If organizational policy forbids helper headers, expose dedicated OpenShift routes for each team (`vts-app1.apps-crc.testing` and `vts-app2.apps-crc.testing`) and use OpenText's native secure connection API:
-
-```c
-vuser_init()
-{
-    // lrvtc_connect_ex(server, port, tls_mode, username, password, auth_type)
-    lrvtc_connect_ex("vts-app1.apps-crc.testing", 443, 1, "vtsadmin", "*****", 1);
-    return 0;
-}
-```
-
----
-
-## 6. Complete REST API Reference
-
-All requests must include `Content-Type: application/json` and `Authorization: Basic <base64(vtsadmin:*****>`.
-
-| API Purpose | HTTP | URL Endpoint | Request Body | Sample Response |
-| :--- | :--- | :--- | :--- | :--- |
-| **Fetch Table Slice** | POST | `/<team>/proxy/<port>/client_api/getTable` | `{"start": 1, "end": 2}` | `[["1","IND_Cust_1",...],["2","IND_Cust_2",...]]` |
-| **Fetch Cell Range** | POST | `/<team>/proxy/<port>/client_api/getColumnRange` | `{"column": "Customer_Code", "start": 1, "end": 1}` | `["IND_Cust_1"]` |
-| **List Columns** | POST | `/<team>/proxy/<port>/client_api/getAllColumns` | `{}` | `["ID","Customer_Code","Status",...]` |
-| **Update Cell** | POST | `/<team>/proxy/<port>/client_api/update` | `{"index": 1, "column": "Status", "value": "PROCESSED"}` | `null` (HTTP 200) |
-| **FIFO Retrieve** | POST | `/<team>/proxy/<port>/client_api/retrieve` | `{"columns": ["Batch_ID"], "condition": 0}` | `["IND_BATCH_B"]` |
-| **Append Row (Bottom)** | POST | `/<team>/proxy/<port>/client_api/add` | `{"option": 0, "new": {"Customer_Code": "NEW_001"}}` | `null` (HTTP 200) |
-| **Insert Row (Top)** | POST | `/<team>/proxy/<port>/client_api/insert` | `{"new": {"Customer_Code": "NEW_001"}}` | `null` (HTTP 200) |
-| **Clear Column Data** | POST | `/<team>/proxy/<port>/client_api/clearColumn` | `{"start": 1, "columns": ["Txn_Amount"]}` | `null` (HTTP 200) |
-
----
-
-## 7. Deployment Instructions & Operational Runbook
-
-### 7.1 File Manifest
-
-```
-containerized_ubuntu_deployment/
-|-- deploy_vts_app.sh           # Automated deployment script for app1, app2, or both
-|-- vts-pvc.yaml                # 10 GiB RWO PersistentVolumeClaim (App1 Team)
-|-- vts-configmap.yaml          # configure.json & NGINX reverse proxy config (App1 Team)
-|-- vts-deployment.yaml         # Stateful single-pod deployment with auto-symlink (App1 Team)
-|-- vts-service.yaml            # ClusterIP Service exposing port 443 -> 8443 (App1 Team)
-|-- vts-route.yaml              # OpenShift Re-encrypt route on /app1-team (App1 Team)
-|-- vts-app2-pvc.yaml           # 10 GiB RWO PersistentVolumeClaim (App2 Team)
-|-- vts-app2-configmap.yaml     # configure.json & NGINX reverse proxy config (App2 Team)
-|-- vts-app2-deployment.yaml    # Stateful single-pod deployment with auto-symlink (App2 Team)
-|-- vts-app2-service.yaml       # ClusterIP Service exposing port 443 -> 8443 (App2 Team)
-|-- vts-app2-route.yaml         # OpenShift Re-encrypt route on /app2-team (App2 Team)
-|-- vts_lrvtc.h                 # VuGen C compatibility header for test engineers
-`-- README.md                   # This document
-```
-
-### 7.2 Automated Deployment Execution
-
-Execute the unified deployer script:
-
-```bash
-# 1. Navigate to deployment folder
 cd /home/mahesh/vts_ocp/containerized_ubuntu_deployment
-
-# 2. Deploy both App1 and App2 teams
 ./deploy_vts_app.sh all
-
-# Or deploy individual teams:
-# ./deploy_vts_app.sh app1
-# ./deploy_vts_app.sh app2
 ```
 
-### 7.3 Verification Commands
-
-#### 1. Check Pod Status
+Or deploy an individual team:
 ```bash
-oc get pods,pvc,route -n lre-vts
+./deploy_vts_app.sh app1
+./deploy_vts_app.sh app2
 ```
 
-#### 2. Query App1 Team Web Console
+### 7.3 Infrastructure Verification Commands
+
+#### 1. Check Pod, Service, Route, and PVC Status
 ```bash
-curl -k -i -u vtsadmin:***** https://vts.apps-crc.testing/app1-team/
+oc get pods,pvc,svc,route -n lre-vts
 ```
 
-#### 3. Query App1 Team Table Data (Port 8888)
+#### 2. Verify Symlink and Persistent Files Inside Pod
 ```bash
-curl -k -s -u vtsadmin:***** -H "Content-Type: application/json" \
-  -d '{"start":1,"end":1}' \
-  https://vts.apps-crc.testing/app1-team/proxy/8888/client_api/getTable
+POD_NAME=$(oc get pod -n lre-vts -l app=vts-app1-team -o jsonpath='{.items[0].metadata.name}')
+oc exec "${POD_NAME}" -n lre-vts -- ls -la /opt/OT/OT_VTS/web/instances.json
+oc exec "${POD_NAME}" -n lre-vts -- ls -la /var/lib/OT/OT_VTS/db/data/
 ```
 
-#### 4. Query App2 Team Table Data (Port 8888)
+#### 3. Inspect Running Processes & Listening Ports
 ```bash
-curl -k -s -u vtsadmin:***** -H "Content-Type: application/json" \
-  -d '{"start":1,"end":1}' \
-  https://vts.apps-crc.testing/app2-team/proxy/8888/client_api/getTable
+oc exec "${POD_NAME}" -n lre-vts -- ss -tlpn
 ```
 
-#### 5. Verify Cold Pod Restart Persistence
+#### 4. Stream Container Logs
 ```bash
-# Delete pod
-oc delete pod -l app=vts-app1-team -n lre-vts
-
-# Wait for replacement pod to be Ready
-oc wait --for=condition=Ready pod -l app=vts-app1-team -n lre-vts --timeout=120s
-
-# Re-verify row 1 data is preserved
-curl -k -s -u vtsadmin:***** -H "Content-Type: application/json" \
-  -d '{"start":1,"end":1}' \
-  https://vts.apps-crc.testing/app1-team/proxy/8888/client_api/getTable
+oc logs -n lre-vts deployment/vts-app1-team -c vts-server -f
 ```
