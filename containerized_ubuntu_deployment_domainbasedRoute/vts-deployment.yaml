@@ -1,0 +1,159 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vts-app1-team
+  namespace: lre-vts
+  labels:
+    app: vts-app1-team
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vts-app1-team
+  template:
+    metadata:
+      labels:
+        app: vts-app1-team
+    spec:
+      securityContext:
+        fsGroup: 54345
+      containers:
+      - name: vts-server
+        image: performancetesting/opentext_vts_linux_ubuntu:26.1
+        imagePullPolicy: IfNotPresent
+        workingDir: /opt/OT/OT_VTS/web
+        env:
+        - name: GIN_MODE
+          value: "release"
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+          limits:
+            cpu: "2000m"
+            memory: "4Gi"
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          export GIN_MODE=release
+
+          # 1. Ensure SSL certificate exists for in-container NGINX
+          if [ ! -f /opt/OT/OT_VTS/web/vts.crt ] || [ ! -f /opt/OT/OT_VTS/web/vts.key ]; then
+            openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+              -keyout /opt/OT/OT_VTS/web/vts.key \
+              -out /opt/OT/OT_VTS/web/vts.crt \
+              -subj "/CN=vts-app1.apps-crc.testing" 2>/dev/null || true
+          fi
+
+          # 2. Non-destructive repair, validation, and persistence of instances.json
+          DATA_FILE="/var/lib/OT/OT_VTS/db/data/instances.json"
+          BAK_FILE="/var/lib/OT/OT_VTS/db/data/instances.json.bak"
+          DATA_DIR="/var/lib/OT/OT_VTS/db/data"
+
+          mkdir -p "$DATA_DIR"
+          /opt/OT/OT_VTS/web/node -e '
+          const fs = require("fs");
+          const [dataFile, bakFile, dbDir] = process.argv.slice(1);
+
+          let instances = null;
+          // Step A: Parse existing instances.json if present, stripping binary nulls (\0)
+          if (fs.existsSync(dataFile)) {
+            try {
+              let raw = fs.readFileSync(dataFile, "utf8").replace(/\0/g, "").trim();
+              if (raw.length > 0) {
+                let parsed = JSON.parse(raw);
+                if (Array.isArray(parsed)) instances = parsed;
+              }
+            } catch (e) {}
+          }
+          // Step B: If main file unreadable, attempt restoration from clean backup
+          if (!instances && fs.existsSync(bakFile)) {
+            try {
+              let rawBak = fs.readFileSync(bakFile, "utf8").replace(/\0/g, "").trim();
+              if (rawBak.length > 0) {
+                let parsedBak = JSON.parse(rawBak);
+                if (Array.isArray(parsedBak)) instances = parsedBak;
+              }
+            } catch (e) {}
+          }
+          // Step C: Auto-discover existing .vts databases to prevent table loss
+          if (!instances && fs.existsSync(dbDir)) {
+            try {
+              const files = fs.readdirSync(dbDir);
+              const vtsFiles = files.filter(f => f.endsWith(".vts") && f.toLowerCase() !== "default.vts");
+              if (vtsFiles.length > 0) {
+                let port = 2000;
+                instances = vtsFiles.sort().map(f => ({ name: f.replace(/\.vts$/, ""), port: port++, serviceStatus: true }));
+              }
+            } catch (e) {}
+          }
+          // Step D: Initialize empty list only if truly a brand-new installation
+          if (!instances) instances = [];
+          fs.writeFileSync(dataFile, JSON.stringify(instances, null, 2) + "\n", { encoding: "utf8", mode: 0o664 });
+          fs.writeFileSync(bakFile, JSON.stringify(instances, null, 2) + "\n", { encoding: "utf8", mode: 0o664 });
+          ' "$DATA_FILE" "$BAK_FILE" "$DATA_DIR" 2>/dev/null || true
+
+          # Step E: Symlink instances.json so apiserver reads and writes directly to PVC
+          ln -sf "$DATA_FILE" /opt/OT/OT_VTS/web/instances.json
+
+          # 3. Configure automatic RDB snapshots every 60s
+          sed -i '/^save /d' /opt/OT/OT_VTS/web/redis.conf 2>/dev/null || true
+          echo "save 60 1" >> /opt/OT/OT_VTS/web/redis.conf 2>/dev/null || true
+
+          # 5. Start in-container NGINX reverse proxy on port 8443
+          nginx
+
+          # 6. Start supervisor daemon in background
+          ./api_daemon </dev/null &
+
+          # 7. Keep container alive and track processes
+          wait -n
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /bin/bash
+              - -c
+              - |
+                # 1. Backup instances.json before shutdown
+                if [ -s /var/lib/OT/OT_VTS/db/data/instances.json ]; then
+                  cp -f /var/lib/OT/OT_VTS/db/data/instances.json /var/lib/OT/OT_VTS/db/data/instances.json.bak
+                fi
+                # 2. Graceful flush hook: save all active Valkey databases to PVC before termination
+                for pid in $(pgrep valkey-server 2>/dev/null); do
+                  PORT=$(cat /proc/$pid/cmdline 2>/dev/null | tr '\0' ' ' | grep -oP '127\.0\.0\.1:\K\d+')
+                  if [ -n "$PORT" ]; then
+                    /opt/OT/OT_VTS/web/valkey-cli -p "$PORT" save 2>/dev/null || true
+                  fi
+                done
+                sync
+        ports:
+        - name: https-web
+          containerPort: 8443
+        volumeMounts:
+        - name: config-mount
+          mountPath: /opt/OT/OT_VTS/web/configure.json
+          subPath: configure.json
+        - name: nginx-mount
+          mountPath: /etc/nginx/nginx.conf
+          subPath: vts-nginx.conf
+        - name: vts-db-storage
+          mountPath: /var/lib/OT/OT_VTS/db/data
+      volumes:
+      - name: config-mount
+        configMap:
+          name: vts-app1-config
+          items:
+          - key: configure.json
+            path: configure.json
+      - name: nginx-mount
+        configMap:
+          name: vts-app1-config
+          items:
+          - key: vts-nginx.conf
+            path: vts-nginx.conf
+      - name: vts-db-storage
+        persistentVolumeClaim:
+          claimName: vts-app1-data-pvc

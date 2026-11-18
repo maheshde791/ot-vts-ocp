@@ -45,29 +45,34 @@ This document provides complete technical specifications, infrastructure designs
 
 The deployment enables dual-tenant hosting on OpenShift under a single shared Fully Qualified Domain Name (`https://vts.apps-crc.testing`) with zero modifications to vendor files on disk:
 
-```
-                                  +---------------------------------------+
-                                  | LoadRunner LGs / Testers' Web Browser |
-                                  +-------------------+-------------------+
-                                                      |
-                                    HTTPS Port 443 (TLS 1.2 / TLS 1.3)
-                                                      v
-                                  +---------------------------------------+
-                                  |    OpenShift Ingress HAProxy Router   |
-                                  |       (vts.apps-crc.testing)          |
-                                  +-------------------+-------------------+
-                                                      |
-                         +----------------------------+----------------------------+
-                         | Path: /app1-team/*                                      | Path: /app2-team/*
-                         v                                                         v
-         +-------------------------------+                         +-------------------------------+
-         | Pod: vts-app1-team            |                         | Pod: vts-app2-team            |
-         |  - In-Container NGINX (:8443) |                         |  - In-Container NGINX (:8443) |
-         |  - VTS Web Console (:4000)    |                         |  - VTS Web Console (:4000)    |
-         |  - Default Table (:8888)      |                         |  - Default Table (:8888)      |
-         |  - Custom Tables (:2000-2018) |                         |  - Custom Tables (:2000-2018) |
-         |  - Persistent PVC (10 GiB)    |                         |  - Persistent PVC (10 GiB)    |
-         +-------------------------------+                         +-------------------------------+
+```mermaid
+flowchart TD
+    subgraph Clients["1. On-Premises Network"]
+        LGs["Load Generators (Enterprise LAN / DMZ)"]
+        VuGen["VuGen Workstations (Performance Testers)"]
+    end
+
+    AppGW["2. Application Gateway / Ingress Controller\n(Single Shared Host: https://vts.internal.domain:443)"]
+
+    subgraph Pod1["3. App 1 VTS Pod (Tenant 1)"]
+        N1["In-Container NGINX\n(Path-Strip: /app1-team/* -> /)"]
+        V1["VTS Engine\n(Admin UI & Table REST APIs)"]
+        P1[("Persistent Storage\n(PVC Data)")]
+        N1 --> V1 --> P1
+    end
+
+    subgraph Pod2["4. App 2 VTS Pod (Tenant 2)"]
+        N2["In-Container NGINX\n(Path-Strip: /app2-team/* -> /)"]
+        V2["VTS Engine\n(Admin UI & Table REST APIs)"]
+        P2[("Persistent Storage\n(PVC Data)")]
+        N2 --> V2 --> P2
+    end
+
+    %% Network Flow
+    LGs -->|HTTPS Port 443| AppGW
+    VuGen -->|HTTPS Port 443| AppGW
+    AppGW -->|Path: /app1-team/*| N1
+    AppGW -->|Path: /app2-team/*| N2
 ```
 
 ---
