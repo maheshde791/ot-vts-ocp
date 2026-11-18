@@ -3,7 +3,7 @@
 This document provides complete technical specifications, infrastructure designs, container runtime details, and deployment procedures for deploying containerized **OpenText Virtual Table Server (VTS) 26.1** on **Red Hat OpenShift / CRC** using **Path-Based Multi-Tenancy**.
 
 > [!NOTE]
-> For LoadRunner VuGen script integration, cURL query samples, and test data automation, refer to the dedicated [**TESTERS_GUIDE.md**](TESTERS_GUIDE.md).
+> For LoadRunner VuGen script integration, cURL query samples, and test data automation, refer to the dedicated [**TESTERS_GUIDE.md**](vugen_handling_example/TESTERS_GUIDE.md).
 
 ---
 
@@ -321,8 +321,8 @@ All manifests reside in `/home/mahesh/vts_ocp/containerized_ubuntu_deployment_pa
 | [`vts-app2-deployment.yaml`](vts-app2-deployment.yaml) | Deployment | Single-pod stateful workload with auto-symlink for App2 Team |
 | [`vts-app2-service.yaml`](vts-app2-service.yaml) | Service | ClusterIP exposing port `443` $\rightarrow$ `8443` for App2 Team |
 | [`vts-app2-route.yaml`](vts-app2-route.yaml) | Route | OpenShift Re-encrypt route on `/app2-team` for App2 Team |
-| [`vts_lrvtc.h`](vts_lrvtc.h) | C Header | VuGen compatibility header for LoadRunner test scripts |
-| [`TESTERS_GUIDE.md`](TESTERS_GUIDE.md) | Markdown | Test engineering, cURL queries, and VuGen integration guide |
+| [`vugen_handling_example/vts_lrvtc.h`](vugen_handling_example/vts_lrvtc.h) | C Header | VuGen compatibility header for LoadRunner test scripts |
+| [`vugen_handling_example/TESTERS_GUIDE.md`](vugen_handling_example/TESTERS_GUIDE.md) | Markdown | Test engineering, cURL queries, and VuGen integration guide |
 
 ### 7.2 Automated Deployment (`deploy_vts_app.sh`)
 

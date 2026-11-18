@@ -6,21 +6,9 @@
  * OpenText LoadRunner VuGen Compatibility Header: vts_lrvtc.h
  * ==============================================================================
  * Purpose:
- *   Enables LoadRunner performance testing scripts to communicate with
- *   containerized multi-tenant OpenText VTS instances using native lrvtc_* method
- *   syntax (lrvtc_connect, lrvtc_query_row, lrvtc_update_message, etc.)
- *   with ZERO changes to existing script business logic in Action.c.
- *
- * Supported Protocols & Runtimes:
- *   - VuGen Web (HTTP/HTML)
- *   - VuGen TruClient
- *   - LoadRunner Enterprise / Professional Load Generators (Windows & Linux)
- *
- * Security & Network Handling:
- *   - Automatically passes Basic Authentication header (vtsadmin:*****)
- *   - Supports HTTPS/TLS 1.2 on port 443 with Ingress path prefixes (/app1-team, /app2-team)
- *   - Automatically parses JSON responses and populates VuGen parameters:
- *       lrvtc_query_row(1) -> creates {Customer_Code}, {Status}, {Txn_Amount}, etc.
+ *   Enables LoadRunner scripts to communicate with containerized multi-tenant
+ *   OpenText VTS instances using native lrvtc_* method syntax with ZERO changes
+ *   to script code in Action.c, vuser_init.c, and vuser_end.c.
  * ==============================================================================
  */
 
@@ -36,17 +24,7 @@ static int  _vts_connected = 0;
 static char _vts_cols[60][64];
 static int  _vts_col_count = 0;
 
-/*
- * ------------------------------------------------------------------------------
- * lrvtc_connect
- * ------------------------------------------------------------------------------
- * Connects to the VTS pod and discovers column names for automatic parameterization.
- * Server argument can be:
- *   - "vts.apps-crc.testing/app1-team" (Path-based OpenShift Ingress)
- *   - "https://vts.apps-crc.testing/app2-team" (Full URL format)
- *   - "app1-team" (Short name, defaults to https://vts.apps-crc.testing/<name>)
- */
-int lrvtc_connect(char *server, int port, int options) {
+int vts_wrap_connect(char *server, int port, int options) {
     char url[350];
     char temp_str[128];
     int i;
@@ -64,11 +42,9 @@ int lrvtc_connect(char *server, int port, int options) {
     lr_output_message("[VTS] Connecting to %s (Instance Port %d)...", _vts_base_url, _vts_port);
 
     web_set_sockets_option("SSL_VERSION", "TLS1.2");
-    web_add_auto_header("Authorization", _vts_auth_hdr);
-    web_add_auto_header("Content-Type", "application/json");
 
-    // Fetch column schema for automatic VuGen parameter creation
     sprintf(url, "%s/proxy/%d/client_api/getAllColumns", _vts_base_url, _vts_port);
+    lr_save_string(url, "VTS_ReqUrl");
 
     web_reg_save_param_json(
         "ParamName=VTS_SchemaCols",
@@ -77,8 +53,11 @@ int lrvtc_connect(char *server, int port, int options) {
         "NotFound=Warning",
         LAST);
 
+    web_add_header("Authorization", _vts_auth_hdr);
+    web_add_header("Content-Type", "application/json");
+
     web_custom_request("VTS_Connect_Init",
-        "URL={url}",
+        "URL={VTS_ReqUrl}",
         "Method=POST",
         "Body={}",
         LAST);
@@ -90,7 +69,7 @@ int lrvtc_connect(char *server, int port, int options) {
             strcpy(_vts_cols[i - 1], lr_eval_string(temp_str));
         }
         _vts_connected = 1;
-        lr_output_message("[VTS] Successfully connected! Discovered %d columns.", _vts_col_count);
+        lr_output_message("[VTS] Connected successfully! Discovered %d columns.", _vts_col_count);
         return 0;
     }
 
@@ -99,14 +78,7 @@ int lrvtc_connect(char *server, int port, int options) {
     return -1;
 }
 
-/*
- * ------------------------------------------------------------------------------
- * lrvtc_query_row
- * ------------------------------------------------------------------------------
- * Fetches the entire row at row_num and automatically populates {ColumnName}
- * parameters for every column discovered during connection.
- */
-int lrvtc_query_row(int row_num) {
+int vts_wrap_query_row(int row_num) {
     char url[350];
     char body[128];
     char reg_expr[128];
@@ -120,8 +92,9 @@ int lrvtc_query_row(int row_num) {
 
     sprintf(url, "%s/proxy/%d/client_api/getTable", _vts_base_url, _vts_port);
     sprintf(body, "{\"start\":%d,\"end\":%d}", row_num, row_num);
+    lr_save_string(url, "VTS_ReqUrl");
+    lr_save_string(body, "VTS_ReqBody");
 
-    // Register correlation for each column
     for (i = 0; i < _vts_col_count; i++) {
         sprintf(reg_expr, "ParamName=%s", _vts_cols[i]);
         sprintf(query_expr, "QueryString=$[0][%d]", i);
@@ -132,22 +105,19 @@ int lrvtc_query_row(int row_num) {
             LAST);
     }
 
+    web_add_header("Authorization", _vts_auth_hdr);
+    web_add_header("Content-Type", "application/json");
+
     web_custom_request("VTS_QueryRow",
-        "URL={url}",
+        "URL={VTS_ReqUrl}",
         "Method=POST",
-        "Body={body}",
+        "Body={VTS_ReqBody}",
         LAST);
 
     return 0;
 }
 
-/*
- * ------------------------------------------------------------------------------
- * lrvtc_query_column
- * ------------------------------------------------------------------------------
- * Fetches a single cell at row_num and saves it into parameter {col_name}.
- */
-int lrvtc_query_column(char *col_name, int row_num) {
+int vts_wrap_query_column(char *col_name, int row_num) {
     char url[350];
     char body[128];
     char reg_expr[128];
@@ -156,30 +126,29 @@ int lrvtc_query_column(char *col_name, int row_num) {
 
     sprintf(url, "%s/proxy/%d/client_api/getColumnRange", _vts_base_url, _vts_port);
     sprintf(body, "{\"column\":\"%s\",\"start\":%d,\"end\":%d}", col_name, row_num, row_num);
-    sprintf(reg_expr, "ParamName=%s", col_name);
+    lr_save_string(url, "VTS_ReqUrl");
+    lr_save_string(body, "VTS_ReqBody");
 
+    sprintf(reg_expr, "ParamName=%s", col_name);
     web_reg_save_param_json(
         reg_expr,
         "QueryString=$[0]",
         "NotFound=Warning",
         LAST);
 
+    web_add_header("Authorization", _vts_auth_hdr);
+    web_add_header("Content-Type", "application/json");
+
     web_custom_request("VTS_QueryColumn",
-        "URL={url}",
+        "URL={VTS_ReqUrl}",
         "Method=POST",
-        "Body={body}",
+        "Body={VTS_ReqBody}",
         LAST);
 
     return 0;
 }
 
-/*
- * ------------------------------------------------------------------------------
- * lrvtc_update_message
- * ------------------------------------------------------------------------------
- * Updates a cell at row_num for the specified column.
- */
-int lrvtc_update_message(char *col_name, int row_num, char *val) {
+int vts_wrap_update_message(char *col_name, int row_num, char *val) {
     char url[350];
     char body[512];
 
@@ -187,23 +156,22 @@ int lrvtc_update_message(char *col_name, int row_num, char *val) {
 
     sprintf(url, "%s/proxy/%d/client_api/update", _vts_base_url, _vts_port);
     sprintf(body, "{\"index\":%d,\"column\":\"%s\",\"value\":\"%s\"}", row_num, col_name, val);
+    lr_save_string(url, "VTS_ReqUrl");
+    lr_save_string(body, "VTS_ReqBody");
+
+    web_add_header("Authorization", _vts_auth_hdr);
+    web_add_header("Content-Type", "application/json");
 
     web_custom_request("VTS_UpdateMessage",
-        "URL={url}",
+        "URL={VTS_ReqUrl}",
         "Method=POST",
-        "Body={body}",
+        "Body={VTS_ReqBody}",
         LAST);
 
     return 0;
 }
 
-/*
- * ------------------------------------------------------------------------------
- * lrvtc_retrieve_message
- * ------------------------------------------------------------------------------
- * Pops the top value of col_name (FIFO) and saves it into parameter {col_name}.
- */
-int lrvtc_retrieve_message(char *col_name) {
+int vts_wrap_retrieve_message(char *col_name) {
     char url[350];
     char body[128];
     char reg_expr[128];
@@ -212,30 +180,29 @@ int lrvtc_retrieve_message(char *col_name) {
 
     sprintf(url, "%s/proxy/%d/client_api/retrieve", _vts_base_url, _vts_port);
     sprintf(body, "{\"columns\":[\"%s\"],\"condition\":0}", col_name);
-    sprintf(reg_expr, "ParamName=%s", col_name);
+    lr_save_string(url, "VTS_ReqUrl");
+    lr_save_string(body, "VTS_ReqBody");
 
+    sprintf(reg_expr, "ParamName=%s", col_name);
     web_reg_save_param_json(
         reg_expr,
         "QueryString=$[0]",
         "NotFound=Warning",
         LAST);
 
+    web_add_header("Authorization", _vts_auth_hdr);
+    web_add_header("Content-Type", "application/json");
+
     web_custom_request("VTS_RetrieveMessage",
-        "URL={url}",
+        "URL={VTS_ReqUrl}",
         "Method=POST",
-        "Body={body}",
+        "Body={VTS_ReqBody}",
         LAST);
 
     return 0;
 }
 
-/*
- * ------------------------------------------------------------------------------
- * lrvtc_send_message
- * ------------------------------------------------------------------------------
- * Appends a new value to the specified column at the bottom of the table.
- */
-int lrvtc_send_message(char *col_name, char *val, int index) {
+int vts_wrap_send_message(char *col_name, char *val, int index) {
     char url[350];
     char body[512];
 
@@ -243,23 +210,22 @@ int lrvtc_send_message(char *col_name, char *val, int index) {
 
     sprintf(url, "%s/proxy/%d/client_api/add", _vts_base_url, _vts_port);
     sprintf(body, "{\"option\":0,\"new\":{\"%s\":\"%s\"}}", col_name, val);
+    lr_save_string(url, "VTS_ReqUrl");
+    lr_save_string(body, "VTS_ReqBody");
+
+    web_add_header("Authorization", _vts_auth_hdr);
+    web_add_header("Content-Type", "application/json");
 
     web_custom_request("VTS_SendMessage",
-        "URL={url}",
+        "URL={VTS_ReqUrl}",
         "Method=POST",
-        "Body={body}",
+        "Body={VTS_ReqBody}",
         LAST);
 
     return 0;
 }
 
-/*
- * ------------------------------------------------------------------------------
- * lrvtc_clear_column
- * ------------------------------------------------------------------------------
- * Clears all data within the specified column.
- */
-int lrvtc_clear_column(char *col_name) {
+int vts_wrap_clear_column(char *col_name) {
     char url[350];
     char body[128];
 
@@ -267,26 +233,47 @@ int lrvtc_clear_column(char *col_name) {
 
     sprintf(url, "%s/proxy/%d/client_api/clearColumn", _vts_base_url, _vts_port);
     sprintf(body, "{\"start\":1,\"columns\":[\"%s\"]}", col_name);
+    lr_save_string(url, "VTS_ReqUrl");
+    lr_save_string(body, "VTS_ReqBody");
+
+    web_add_header("Authorization", _vts_auth_hdr);
+    web_add_header("Content-Type", "application/json");
 
     web_custom_request("VTS_ClearColumn",
-        "URL={url}",
+        "URL={VTS_ReqUrl}",
         "Method=POST",
-        "Body={body}",
+        "Body={VTS_ReqBody}",
         LAST);
 
     return 0;
 }
 
-/*
- * ------------------------------------------------------------------------------
- * lrvtc_disconnect
- * ------------------------------------------------------------------------------
- * Cleans up session and resets connection state.
- */
-void lrvtc_disconnect() {
+int vts_wrap_disconnect() {
     _vts_connected = 0;
     _vts_col_count = 0;
-    lr_output_message("[VTS] Disconnected from %s", _vts_base_url);
+    lr_output_message("[VTS] Disconnected cleanly.");
+    return 0;
 }
+
+// -----------------------------------------------------------------------------
+// Preprocessor macro aliases: Map standard lrvtc_* calls to our wrapper
+// -----------------------------------------------------------------------------
+#undef lrvtc_connect
+#undef lrvtc_disconnect
+#undef lrvtc_query_row
+#undef lrvtc_query_column
+#undef lrvtc_update_message
+#undef lrvtc_retrieve_message
+#undef lrvtc_send_message
+#undef lrvtc_clear_column
+
+#define lrvtc_connect          vts_wrap_connect
+#define lrvtc_disconnect       vts_wrap_disconnect
+#define lrvtc_query_row        vts_wrap_query_row
+#define lrvtc_query_column     vts_wrap_query_column
+#define lrvtc_update_message   vts_wrap_update_message
+#define lrvtc_retrieve_message vts_wrap_retrieve_message
+#define lrvtc_send_message     vts_wrap_send_message
+#define lrvtc_clear_column     vts_wrap_clear_column
 
 #endif // _VTS_LRVTC_H_
