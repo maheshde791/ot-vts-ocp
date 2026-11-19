@@ -366,3 +366,72 @@ oc exec "${POD_NAME}" -n lre-vts -- ss -tlpn
 ```bash
 oc logs -n lre-vts deployment/vts-app1-team -c vts-server -f
 ```
+
+---
+
+## 8. VuGen / LoadRunner Integration: Why `vts_lrvtc.h` is Mandatory for Path-Based Routing
+
+In Path-Based Multi-Tenancy, all teams share a single domain (`vts.apps-crc.testing`) and are partitioned by URL sub-paths (`/app1-team`, `/app2-team`). 
+
+Because of this path structure, **the custom compatibility header [`vts_lrvtc.h`](vugen_handling_example/vts_lrvtc.h) is the ONLY working mechanism for VuGen scripts**. The native Query String Runtime Setting and `lrvtc_connect_ex` methods cannot work in this architecture.
+
+### Technical Proof: Why Native Query String & `lrvtc_connect_ex` Fail in Path-Based Routing
+
+When testing native VuGen connection options against path-based routes:
+
+```c
+// THIS FAILS IN PATH-BASED ROUTING:
+rc = lrvtc_connect_ex(
+    "Server=https://vts.apps-crc.testing/app1-team",
+    "Port=8888",
+    "UserName=vtsadmin",
+    "Password=*****",
+    LAST);
+```
+
+VuGen immediately aborts with:
+```text
+vuser_init.c(24): Error: lrvtc_connect_ex: Cannot parse server response.
+Abort was called from an action.
+```
+
+#### The Three Root Causes:
+1. **Socket Resolver Rejection:** Passing `Server=https://vts.apps-crc.testing/app1-team` causes the OS socket resolver (`getaddrinfo`) inside `vtc.dll` to fail, because `/app1-team` is an illegal sequence in a DNS hostname.
+2. **Native `vtc.dll` Root Targeting (`/`):** If the tester passes only the bare domain `https://vts.apps-crc.testing`, `vtc.dll` constructs HTTP queries strictly against the root URI (`POST /?portnumber=8888`). It has no capability to prepend the team subpath (`/app1-team/`).
+3. **OpenShift Ingress 503 Rejection:** OpenShift Router (HAProxy) matches routes strictly by path prefix. A request to `https://vts.apps-crc.testing/` (root `/`) matches neither `/app1-team` nor `/app2-team`, returning `HTTP 503 Service Unavailable (No route found for path /)`. VuGen cannot parse the HTML 503 response and fails.
+
+---
+
+### The Working Solution: Custom Compatibility Header (`vts_lrvtc.h`)
+
+The drop-in header [`vts_lrvtc.h`](vugen_handling_example/vts_lrvtc.h) translates standard `lrvtc_*` calls into LoadRunner Web Turbo Replay queries (`web_custom_request`), explicitly targeting `https://vts.apps-crc.testing/app1-team/proxy/:port/client_api/...` over standard HTTPS port 443 with TLS 1.2/1.3 and Basic Authentication:
+
+```c
+#include "lrun.h"
+#include "web_api.h"
+#include "lrw_custom_body.h"
+#include "vts_lrvtc.h"
+
+int vuser_init()
+{
+    // Connect to App1 Team instance over HTTPS port 443
+    int rc = lrvtc_connect("vts.apps-crc.testing/app1-team", 8888, 0);
+    return rc;
+}
+
+int Action()
+{
+    lrvtc_query_row(1);
+    lr_output_message("Customer Code: %s", lr_eval_string("{Customer_Code}"));
+    lrvtc_update_message("Status", 1, "PROCESSED_VIA_PATH_BASED_WRAPPER");
+    return 0;
+}
+
+int vuser_end()
+{
+    lrvtc_disconnect();
+    return 0;
+}
+```
+
+For complete implementation steps and verification output, refer to [`vugen_handling_example/TESTERS_GUIDE.md`](vugen_handling_example/TESTERS_GUIDE.md).
