@@ -219,7 +219,7 @@ To prevent data corruption, a `preStop` container lifecycle hook executes synchr
 | :--- | :--- | :--- | :--- | :--- |
 | **Ingress Router** | `443` | HTTPS (TLS 1.2/1.3) | Public / LG Facing | External endpoint on `vts.apps-crc.testing` |
 | **Kubernetes Service** | `443` $\rightarrow$ `8443` | TCP (ClusterIP) | Cluster-Internal | Internal service proxying to pod NGINX |
-| **In-Container NGINX** | `8443` | HTTPS (HTTP/2) | Pod-Internal | SSL termination, path stripping, and SPA stream rewriting |
+| **In-Container NGINX** | `8443` | HTTPS (HTTP/1.1 - TLS 1.2/1.3) | Pod-Internal | SSL termination, path stripping, and SPA stream rewriting |
 | **VTS Admin Web UI** | `4000` | HTTP / WebSocket | `127.0.0.1` | Management console and Gorilla WebSocket endpoint (`/ws`) |
 | **Default Table API** | `8888` | HTTP | `127.0.0.1` | Data query/update API for Default instance |
 | **Custom Tables** | `2000`–`2018` | HTTP | `127.0.0.1` | Data query/update APIs for custom instances 1 through 19 |
@@ -277,6 +277,11 @@ if ($query_string ~* "portnumber=") {
 }
 ```
 Only authorized application ports (`4000`, `8888`, and `2000–2050`) are forwarded.
+
+### 5.6 HTTP/2 Vulnerability Remediation (CVE-2026-123007 & CVE-2026-123633)
+To permanently eliminate critical NGINX memory-safety vulnerabilities in the HTTP/2 module (`ngx_http_v2_module`):
+- HTTP/2 is explicitly disabled on the NGINX socket (`listen 8443 ssl;`).
+- This completely deactivates the HTTP/2 processing engine, neutralizing both unauthenticated Heap Buffer Overflow (CVE-2026-123007) and Use-After-Free (CVE-2026-123633) with zero impact to OpenShift Ingress or VTS communication (which operate on standard HTTP/1.1).
 
 ---
 

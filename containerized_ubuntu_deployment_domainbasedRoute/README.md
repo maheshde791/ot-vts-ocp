@@ -64,7 +64,8 @@ The in-container NGINX reverse proxy (`vts-configmap.yaml` and `vts-app2-configm
 
 ```nginx
 server {
-    listen 8443 ssl http2;
+    # HTTP/2 disabled to eliminate CVE-2026-123007 & CVE-2026-123633 (Ingress talks HTTP/1.1)
+    listen 8443 ssl;
     server_name _;
 
     ssl_certificate      /opt/OT/OT_VTS/web/vts.crt;
@@ -170,6 +171,9 @@ cd /home/mahesh/vts_ocp/containerized_ubuntu_deployment_domainbasedRoute
 3. **Role-Based Access Control (RBAC):**
    - API endpoints enforce HTTP Basic Authentication (`Authorization: Basic ...`) with administrator and user roles configured in `configure.json`.
 4. **SSRF Mitigation:** Query-string port redirection is restricted strictly to permitted ports (`4000`, `8888`, `2000–2050`). Access to internal Valkey ports (`10000–30000`) is blocked with HTTP 403.
+5. **HTTP/2 Vulnerability Remediation (CVE-2026-123007 & CVE-2026-123633):**
+   - HTTP/2 is explicitly disabled on the NGINX socket (`listen 8443 ssl;`).
+   - This deactivates the `ngx_http_v2_module` processing engine, completely neutralizing the November 2026 critical vulnerabilities (Integer Underflow/Heap Overflow and Use-After-Free) with zero impact to Ingress or VTS communication (which operate on standard HTTP/1.1).
 
 ---
 
