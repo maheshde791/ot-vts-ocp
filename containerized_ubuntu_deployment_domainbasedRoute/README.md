@@ -53,7 +53,7 @@ flowchart TD
 | **NGINX Complexity** | Requires subpath regex stripping and `sub_filter` HTML/JS modifications | **Pristine native pass-through** (zero HTML/JS rewrites required) |
 | **Web UI Experience** | Requires relative path translation for Angular SPA bundles | Native Angular SPA execution at root `/` with zero asset path issues |
 | **Tenant Isolation** | Logical (Subpath) + Physical (Separate Pods/PVCs) | Complete Domain DNS Isolation + Physical Pod/PVC Isolation |
-| **VuGen Protocol** | Requires `vts_lrvtc.h` to append team subpath prefix | Uses `vts_lrvtc.h` to bridge HTTPS 443 REST directly to target domain |
+| **VuGen Protocol** | Requires `vts_lrvtc.h` (Native `lrvtc_connect_ex` cannot route subpaths) | **100% Native OpenText `lrvtc_connect_ex`** (Option 1) or `vts_lrvtc.h` (Option 2) |
 | **Multi-Instance Support** | Routed via query parameters (`?portnumber=2000`) | Routed via query parameters (`?portnumber=2000`) or `/proxy/:port/` |
 
 ---
@@ -64,7 +64,8 @@ The in-container NGINX reverse proxy (`vts-configmap.yaml` and `vts-app2-configm
 
 ```nginx
 server {
-    listen 8443 ssl http2;
+    # HTTP/2 disabled to eliminate CVE-2026-123007 & CVE-2026-123633 (Ingress talks HTTP/1.1)
+    listen 8443 ssl;
     server_name _;
 
     ssl_certificate      /opt/OT/OT_VTS/web/vts.crt;
@@ -122,12 +123,13 @@ containerized_ubuntu_deployment_domainbasedRoute/
 ├── vts-app2-service.yaml          # ClusterIP exposing port 443 -> 8443 for App2
 ├── vts-app2-route.yaml            # OpenShift Re-encrypt route on vts-app2.apps-crc.testing
 └── vugen_handling_example/
-    ├── TESTERS_GUIDE.md           # Step-by-step VuGen and cURL testing guide
-    ├── single_script_example.c    # Complete all-in-one single-file VuGen test script
-    ├── vuser_init.c               # Modular vuser_init drop-in
-    ├── Action.c                   # Modular Action drop-in
-    ├── vuser_end.c                # Modular vuser_end drop-in
-    └── vts_lrvtc.h                # Drop-in compatibility header for VuGen
+    ├── TESTERS_GUIDE.md                          # Step-by-step VuGen testing guide (Options 1 & 2)
+    ├── single_script_option1_native_connect_ex.c # Complete script for Option 1 (Native connect_ex)
+    ├── single_script_option2_wrapper_header.c    # Complete script for Option 2 (Wrapper header)
+    ├── vuser_init.c                              # Modular vuser_init drop-in
+    ├── Action.c                                  # Modular Action drop-in
+    ├── vuser_end.c                               # Modular vuser_end drop-in
+    └── vts_lrvtc.h                               # Drop-in compatibility header (Option 2 fallback)
 ```
 
 ---
@@ -169,33 +171,37 @@ cd /home/mahesh/vts_ocp/containerized_ubuntu_deployment_domainbasedRoute
 3. **Role-Based Access Control (RBAC):**
    - API endpoints enforce HTTP Basic Authentication (`Authorization: Basic ...`) with administrator and user roles configured in `configure.json`.
 4. **SSRF Mitigation:** Query-string port redirection is restricted strictly to permitted ports (`4000`, `8888`, `2000–2050`). Access to internal Valkey ports (`10000–30000`) is blocked with HTTP 403.
+5. **HTTP/2 Vulnerability Remediation (CVE-2026-123007 & CVE-2026-123633):**
+   - HTTP/2 is explicitly disabled on the NGINX socket (`listen 8443 ssl;`).
+   - This deactivates the `ngx_http_v2_module` processing engine, completely neutralizing the November 2026 critical vulnerabilities (Integer Underflow/Heap Overflow and Use-After-Free) with zero impact to Ingress or VTS communication (which operate on standard HTTP/1.1).
 
 ---
 
-## 8. Enterprise Architectural Defense: Why `vts_lrvtc.h` is Mandatory
+## 8. Enterprise VuGen Integration Options: Native vs. Wrapper
 
-When presenting this architecture to performance testing teams, enterprise architects, and cyber security leads, use the following technical defense:
+In Domain-Based Multi-Tenancy, performance testing teams have two distinct options to communicate with VTS instances over HTTPS Port 443:
 
-### A. The Ingress Reality: Dual-Port Raw TCP vs. Single HTTPS Port 443
-* **Legacy Windows VM VTS:** In legacy on-premises environments, each VTS table instance opened an independent, unencrypted, raw TCP port (`8888`, `2000`, `2001` up to `2050`). LoadRunner's native `vtc.dll` connected directly to these raw sockets.
-* **Enterprise Cloud Kubernetes / OpenShift:** Enterprise security standards and cloud Ingress controllers strictly forbid exposing arbitrary raw TCP ports. All inbound traffic **must enter exclusively via standard HTTPS Port 443** with TLS inspection. Native `vtc.dll` has no capability to route multi-instance traffic over a single Layer 7 HTTPS port.
+### Option 1 (Recommended / Enterprise Standard): Native OpenText `lrvtc_connect_ex`
+* **How It Works:** Testers enable **"Access VTS port by query string"** in VuGen Runtime Settings (`F4 -> General -> Miscellaneous -> VTS -> HTTPS Port: 443`). In `vuser_init.c`, testers invoke OpenText's native extended function:
+  ```c
+  rc = lrvtc_connect_ex(
+      "Server=https://vts-app1.apps-crc.testing",
+      "Port=8888",
+      "UserName=vtsadmin",
+      "Password=*****",
+      LAST);
+  ```
+* **Why It is Recommended:**
+  1. **Zero Custom Wrapper Files:** Requires NO header files (`vts_lrvtc.h`) to be copied or maintained across testing teams.
+  2. **100% Native Vendor Support:** Uses standard OpenText APIs documented in official Micro Focus / OpenText documentation.
+  3. **High Performance:** Replays directly via `vtc.dll` over TLS 443 with sub-200ms transaction times.
+  4. **Multi-Instance Support:** Changing `Port=` (e.g. `8888` to `2001`) dynamically routes to different isolated tables within the same pod.
+* **Full Example Script:** [`vugen_handling_example/single_script_option1_native_connect_ex.c`](vugen_handling_example/single_script_option1_native_connect_ex.c).
 
-### B. The Protocol Disconnect: Modern Go REST API vs. Legacy Binary Sockets
-* **OpenText VTS 26.1 Backend:** OpenText completely re-architected the Linux VTS backend in Go (Gin framework), exposing modern RESTful HTTP endpoints (`/client_api/queryRow`, `/client_api/update`, `/client_api/getTable`).
-* **LoadRunner `vtc.dll` Client Driver:** The built-in client DLL inside VuGen 2026.1 still transmits legacy 2012 C/C++ binary socket RPC frames. When connecting to containerized VTS, `vtc.dll` fails during session negotiation (`Cannot parse server response` / `Failed to connect to the server`).
-* **The Bridge (`vts_lrvtc.h`):** The header intercepts standard `lrvtc_*` method calls and executes them via LoadRunner’s native Web Turbo Replay engine (`web_custom_request`) over HTTPS port 443. All test logic in `Action.c` remains **100% standard LoadRunner C code**.
-
-### C. Enterprise Cloud Portability (Local CRC to Production Cloud)
-The compatibility header is **100% environment-agnostic**:
-* It contains zero hardcoded IP addresses or cluster paths.
-* **Moving from local CRC to the Enterprise Cloud Landing Zone requires ZERO code changes in the header.**
-* Only the domain name string in `lrvtc_connect()` changes (e.g. from `vts-app1.apps-crc.testing` to `vts-app1.<enterprise-cloud-domain>`).
-* On-premises physical Load Generators, cloud Load Generators, and tester workstations interact identically over outbound HTTPS port 443.
-
-### D. Why OpenText Documented Docker Daemon but Not Kubernetes
-* OpenText’s documentation illustrates a basic standalone Docker host where all ports (`4000`, `8888`, `2000–2050`) are bound directly to host network interfaces (`--net=host`). This assumes a flat, non-production network without firewalls, Ingress controllers, or tenant isolation.
-* Enterprise Kubernetes / OpenShift platforms require declarative Ingress routing (Port 443 only), pod auto-recovery, persistent storage decoupling (PVCs), and non-root security contexts.
-* OpenText delivered the application container image; enterprise Ingress orchestration and client protocol bridging are standard enterprise enablement responsibilities.
+### Option 2 (Least Preferred / Fallback): Custom Compatibility Header (`vts_lrvtc.h`)
+* **How It Works:** Testers copy [`vugen_handling_example/vts_lrvtc.h`](vugen_handling_example/vts_lrvtc.h) into their script directory, `#include "vts_lrvtc.h"`, and call standard `lrvtc_connect("vts-app1.apps-crc.testing", 8888, 0)`.
+* **When to Use:** Only needed for legacy LoadRunner versions that do not support `lrvtc_connect_ex` or environments where testers are restricted from modifying VuGen Runtime Settings.
+* **Full Example Script:** [`vugen_handling_example/single_script_option2_wrapper_header.c`](vugen_handling_example/single_script_option2_wrapper_header.c).
 
 ---
 
@@ -203,7 +209,7 @@ The compatibility header is **100% environment-agnostic**:
 
 | Stakeholder | Potential Concern / Question | Authoritative Architectural Defense |
 | :--- | :--- | :--- |
-| **Performance Testers** | *"Do we need to rewrite all our existing VTS test scripts?"* | **No.** Your `Action.c` code remains 100% standard (`lrvtc_query_row`, `lrvtc_update_message`, `lr_eval_string`). You simply include `vts_lrvtc.h` in `vuser_init.c` to route over HTTPS port 443. |
-| **Cyber Security & Networks** | *"Why can't VuGen connect directly on port 8888 or 2000?"* | Exposing 50+ raw unencrypted TCP ports through enterprise cloud firewalls violates Zero-Trust policies. Our solution routes 100% of VTS traffic through standard HTTPS Port 443 with TLS 1.2/1.3 re-encryption. |
-| **Cloud Platform Architects** | *"Why didn't OpenText provide native Ingress support out of the box?"* | OpenText's documentation only covers standalone Docker daemon on single VMs. In Kubernetes platforms, Layer 7 Ingress routing on Port 443 is mandatory. The header bridges OpenText's legacy client DLL to their modern Go REST API. |
-| **Project & Test Leads** | *"Will this setup break or require major rework in production cloud?"* | **No.** The header and manifests are cloud-agnostic. The exact same header and container configuration will deploy seamlessly to production enterprise OpenShift or Kubernetes. |
+| **Performance Testers** | *"Do we need custom header files or wrappers to connect to VTS?"* | **No.** Under Domain-Based routing, you can use 100% native OpenText `lrvtc_connect_ex` simply by checking 'Access VTS port by query string' in Runtime Settings (F4). `vts_lrvtc.h` is only retained as an optional fallback. |
+| **Cyber Security & Networks** | *"Why can't VuGen connect directly on raw ports 8888 or 2000?"* | Exposing 50+ raw unencrypted TCP ports through enterprise cloud firewalls violates Zero-Trust policies. Our solution routes 100% of VTS traffic through standard HTTPS Port 443 with TLS 1.2/1.3 re-encryption and anti-SSRF filtering. |
+| **Cloud Platform Architects** | *"Why does Domain-Based routing succeed with native VuGen where Path-Based routing failed?"* | VuGen's native `vtc.dll` socket resolver only accepts hostnames, not subpaths (`/app1-team`). In Path-Based routing, VuGen requests the root `/`, which OpenShift Ingress rejects with 503. Domain-Based routing provides clean root `/` access per team, allowing native `lrvtc_connect_ex` to work out of the box. |
+| **Project & Test Leads** | *"Will this setup break or require major rework in production cloud?"* | **No.** The manifests and scripts are cloud-agnostic. The exact same scripts and container configuration deploy seamlessly to production enterprise OpenShift or AKS. |

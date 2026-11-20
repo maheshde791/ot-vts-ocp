@@ -10,7 +10,7 @@
 #   ./deploy_vts_app.sh [app1|app2|all] (default: all)
 #
 # Key Architectural Features:
-#   1. In-Container NGINX Reverse Proxy (Port 8443 SSL HTTP/2)
+#   1. In-Container NGINX Reverse Proxy (Port 8443 SSL TLS 1.2/1.3, HTTP/2 disabled for CVE remediation)
 #   2. Dynamic Path-Stripping for Enterprise Ingress (/app1-team -> /, /app2-team -> /)
 #   3. Multi-Instance Query-String Port Forwarding (?portnumber=4000, 8888, 2000-2050)
 #   4. End-to-End TLS Re-encryption & Enterprise Certificate Architecture:
