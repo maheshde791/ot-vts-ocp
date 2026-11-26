@@ -1,10 +1,13 @@
 # ==============================================================================
 # KodeKloud Azure Playground - AKS + OpenText VTS 26.1 Repro Commands
 # ==============================================================================
-# Notes:
-# - Tested on KodeKloud Azure Playground (Standard_D2s_v3, managed-csi, Kubernetes 1.36)
-# - Premium disks are blocked in KodeKloud; use managed-csi (Standard SSD, <= 128 GB)
-# - VTS Basic Auth returns 401 on /, so probes use tcpSocket on port 8443
+# Matches the current vts-aks/ architecture:
+# - Separate Secret (vts-app1-credentials) with administrator & read-only user roles
+# - Separate TLS Secret (vts-app1-tls-cert) mounted read-only at /opt/OT/OT_VTS/web/certs
+# - ConfigMap template rendered at startup into /opt/OT/OT_VTS/web/configure.json (mode 0600)
+# - CVE-remediated NGINX (listen 8443 ssl; AES-256-GCM / AES-128-GCM ciphers)
+# - Hardened Pod Security (runAsNonRoot: true, UID/GID 54345, drop ALL, RuntimeDefault)
+# - tcpSocket probes on port 8443 + managed-csi (Standard SSD) PVC + preStop Valkey flush
 # ==============================================================================
 
 # 1. Verify pre-assigned Resource Group & Location (do NOT create a new RG)
@@ -27,13 +30,17 @@ az aks get-credentials --resource-group "$RG" --name vts-aks-test --overwrite-ex
 kubectl get nodes
 kubectl get sc
 
-# 4. Deploy OpenText VTS 26.1 (Hardened non-root, managed-csi PVC, tcpSocket probes, LoadBalancer)
+# 4. Create Namespace & Sandbox TLS Secret (simulates Enterprise PKI Secret mount)
+kubectl create namespace lre-vts
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout /tmp/vts-tls.key -out /tmp/vts-tls.crt \
+  -subj "/CN=vts-app1.internal.cloud.corp"
+kubectl create secret tls vts-app1-tls-cert -n lre-vts \
+  --cert=/tmp/vts-tls.crt --key=/tmp/vts-tls.key
+rm -f /tmp/vts-tls.crt /tmp/vts-tls.key
+
+# 5. Deploy PVC, Dual-Role Secret, ConfigMap Template, Hardened Deployment & LoadBalancer
 cat <<'EOF' | kubectl apply -f -
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: lre-vts
----
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -46,6 +53,18 @@ spec:
   resources:
     requests:
       storage: 10Gi
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vts-app1-credentials
+  namespace: lre-vts
+type: Opaque
+stringData:
+  admin_user: "vtsadmin"
+  admin_password: "SandboxAdmin123!"
+  readonly_user: "tester"
+  readonly_password: "SandboxUser123!"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -68,9 +87,10 @@ data:
       "admin": {
         "authentication": "Basic",
         "users": [
-          { "user": "vtsadmin", "password": "SandboxTest123!", "display": "VTS Administrator" }
+          { "user": "vtsadmin", "password": "__VTS_ADMIN_PASSWORD__", "display": "VTS Administrator" },
+          { "user": "tester", "password": "__VTS_READONLY_PASSWORD__", "display": "Test Operator (Read-Only)" }
         ],
-        "role": { "administrator": ["vtsadmin"], "user": [] },
+        "role": { "administrator": ["vtsadmin"], "user": ["tester"] },
         "requireBasicAuthForAPI": true,
         "useSSL": false
       },
@@ -99,10 +119,10 @@ data:
         server {
             listen 8443 ssl;
             server_name _;
-            ssl_certificate /opt/OT/OT_VTS/web/vts.crt;
-            ssl_certificate_key /opt/OT/OT_VTS/web/vts.key;
+            ssl_certificate /opt/OT/OT_VTS/web/certs/tls.crt;
+            ssl_certificate_key /opt/OT/OT_VTS/web/certs/tls.key;
             ssl_protocols TLSv1.2 TLSv1.3;
-            ssl_ciphers HIGH:!aNULL:!MD5;
+            ssl_ciphers ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256;
             proxy_http_version 1.1;
             proxy_set_header Upgrade $http_upgrade;
             proxy_set_header Connection $connection_upgrade;
@@ -160,6 +180,16 @@ spec:
         env:
         - name: GIN_MODE
           value: "release"
+        - name: VTS_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: vts-app1-credentials
+              key: admin_password
+        - name: VTS_READONLY_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: vts-app1-credentials
+              key: readonly_password
         resources:
           requests:
             cpu: "500m"
@@ -171,12 +201,16 @@ spec:
         args:
         - |
           export GIN_MODE=release
-          if [ ! -f /opt/OT/OT_VTS/web/vts.crt ] || [ ! -f /opt/OT/OT_VTS/web/vts.key ]; then
-            openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-              -keyout /opt/OT/OT_VTS/web/vts.key \
-              -out /opt/OT/OT_VTS/web/vts.crt \
-              -subj "/CN=vts-app1.aks.test" 2>/dev/null || true
-          fi
+          /opt/OT/OT_VTS/web/node -e '
+          const fs = require("fs");
+          const adminPwd = process.env.VTS_ADMIN_PASSWORD || "";
+          const readonlyPwd = process.env.VTS_READONLY_PASSWORD || "";
+          if (!adminPwd || !readonlyPwd) { console.error("Missing VTS Secret passwords"); process.exit(1); }
+          const rendered = fs.readFileSync("/tmp/configure.json.tmpl", "utf8")
+            .replace("__VTS_ADMIN_PASSWORD__", adminPwd)
+            .replace("__VTS_READONLY_PASSWORD__", readonlyPwd);
+          fs.writeFileSync("/opt/OT/OT_VTS/web/configure.json", rendered, { mode: 0o600 });
+          '
           DATA_FILE="/var/lib/OT/OT_VTS/db/data/instances.json"
           mkdir -p /var/lib/OT/OT_VTS/db/data
           [ -f "$DATA_FILE" ] || echo "[]" > "$DATA_FILE"
@@ -186,6 +220,23 @@ spec:
           nginx
           ./api_daemon </dev/null &
           wait -n
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /bin/bash
+              - -c
+              - |
+                if [ -s /var/lib/OT/OT_VTS/db/data/instances.json ]; then
+                  cp -f /var/lib/OT/OT_VTS/db/data/instances.json /var/lib/OT/OT_VTS/db/data/instances.json.bak
+                fi
+                for pid in $(pgrep valkey-server 2>/dev/null); do
+                  PORT=$(cat /proc/$pid/cmdline 2>/dev/null | tr '\0' ' ' | grep -oP '127\.0\.0\.1:\K\d+')
+                  if [ -n "$PORT" ]; then
+                    /opt/OT/OT_VTS/web/valkey-cli -p "$PORT" save 2>/dev/null || true
+                  fi
+                done
+                sync
         ports:
         - name: https-web
           containerPort: 8443
@@ -208,13 +259,16 @@ spec:
           failureThreshold: 3
         volumeMounts:
         - name: config-mount
-          mountPath: /opt/OT/OT_VTS/web/configure.json
+          mountPath: /tmp/configure.json.tmpl
           subPath: configure.json
         - name: nginx-mount
           mountPath: /etc/nginx/nginx.conf
           subPath: vts-nginx.conf
         - name: vts-db-storage
           mountPath: /var/lib/OT/OT_VTS/db/data
+        - name: enterprise-tls
+          mountPath: /opt/OT/OT_VTS/web/certs
+          readOnly: true
       volumes:
       - name: config-mount
         configMap:
@@ -231,6 +285,9 @@ spec:
       - name: vts-db-storage
         persistentVolumeClaim:
           claimName: vts-app1-data-pvc
+      - name: enterprise-tls
+        secret:
+          secretName: vts-app1-tls-cert
 ---
 apiVersion: v1
 kind: Service
@@ -248,9 +305,14 @@ spec:
     app: vts-app1-team
 EOF
 
-# 5. Check pod, PVC, and LoadBalancer External IP (open https://<EXTERNAL-IP> in browser)
+# 6. Verify pod, PVC, LoadBalancer IP, and Secret-rendered configure.json permissions
 kubectl get pods,pvc,svc -n lre-vts
+kubectl exec -n lre-vts deploy/vts-app1-team -- ls -l /opt/OT/OT_VTS/web/configure.json /opt/OT/OT_VTS/web/certs/
 
-# 6. Persistence test after creating a table/instance in UI (vtsadmin / SandboxTest123!)
+# 7. Test both roles in browser at https://<EXTERNAL-IP>:
+#    - Admin role:     vtsadmin / SandboxAdmin123!
+#    - Read-only role: tester   / SandboxUser123!
+
+# 8. Persistence test (create table/instance in UI first, then delete pod)
 kubectl delete pod -n lre-vts -l app=vts-app1-team
 kubectl get pods -n lre-vts -w

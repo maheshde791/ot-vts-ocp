@@ -23,31 +23,30 @@ This reference manual is tailored for performance test leads, application owners
 
 ```mermaid
 flowchart TD
+    LG["Enterprise Load Generators / VuGen\n(Corporate LAN / DMZ)"] -->|DNS Lookup| DNS["Private Corporate DNS\n(Internal FQDNs)"]
+    LG -->|ExpressRoute / Port 443| Istio["Istio Ingress Gateway (Port 443 / TLS)\n(Managed by Platform Team)"]
+
     subgraph ELZ["Enterprise Cloud Landing Zone (Azure Subscription)"]
         subgraph Tier1["Tier 1 & Tier 2: Owned by Cloud Platform Team"]
-            Net["Hub-and-Spoke VNet / ExpressRoute\n(Connection to On-Premise Load Generators)"]
+            DNS
+            Net["Hub-and-Spoke VNet / ExpressRoute"] -->|Private VNet| Istio
+            AKV["Enterprise Key Vault / Secret Store\n(TLS Certs & Passwords)"] -.->|Certs & Secrets| Istio
             ACR["Enterprise Artifactory / Private ACR\n(enterprise-docker-release-local)"]
-            AKV["Enterprise Key Vault / Secret Store\n(Certificates & Passwords)"]
-            DNS["Private Corporate DNS\n(Internal Enterprise FQDNs)"]
-            Istio["Istio Ingress Gateway (Port 443 / TLS)\n(Managed by Platform Team)"]
         end
 
         subgraph Tier3["Tier 3: Workload Layer (VTS Application Scope)"]
-            direction TB
-            subgraph AKS["Azure Kubernetes Service (AKS)"]
-                NS["Namespace: lre-vts"]
+            subgraph AKS["Azure Kubernetes Service (AKS) - Namespace: lre-vts"]
                 GW["Istio Gateway & VirtualService"]
                 Pods["VTS Pods (app1-team, app2-team)"]
-                PVC["Persistent Storage (Azure Managed Disk 'managed-csi')"]
+                PVC["Persistent Storage (Azure Managed Disk)"]
                 GW --> Pods
-                Pods --- PVC
+                Pods --> PVC
             end
         end
     end
 
-    LG["Enterprise Load Generators / VuGen Workstations\n(Corporate LAN / DMZ)"] -->|ExpressRoute / Port 443| Istio
     Istio -->|VirtualService Routing| GW
-    Net --- AKS
+    AKV -.->|Secret Injection| Pods
     ACR -.->|Immutable Digest Pull| Pods
 ```
 
@@ -86,10 +85,10 @@ flowchart LR
     end
 
     subgraph Model3["Model 3: Dedicated AKS (Platform-Managed / CRE)"]
-        M3_Cloud Platform Team["Cloud Managed Service Team\n(Provisions & Patches Cluster)"]
+        M3_Platform["Cloud Managed Service Team\n(Provisions & Patches Cluster)"]
         M3_Cluster["Dedicated Cluster"]
         M3_VTS["VTS Workload Access Only"]
-        M3_Cloud Platform Team --> M3_Cluster --> M3_VTS
+        M3_Platform --> M3_Cluster --> M3_VTS
     end
 ```
 
@@ -170,10 +169,12 @@ metadata:
   namespace: lre-vts
 type: Opaque
 stringData:
+  # Administrator role: full VTS UI & instance management
   admin_user: "vtsadmin"
   admin_password: "*****"
-  api_user: "vtsadmin"
-  api_password: "*****"
+  # User role (read-only / test operator)
+  readonly_user: "tester"
+  readonly_password: "*****"
 ```
 
 ### 5.3 Istio Ingress Gateway Routing (`vts-istio-ingress.yaml`)
@@ -282,6 +283,11 @@ spec:
             secretKeyRef:
               name: vts-app1-credentials
               key: admin_password
+        - name: VTS_READONLY_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: vts-app1-credentials
+              key: readonly_password
 
         resources:
           requests:
@@ -315,8 +321,9 @@ spec:
           failureThreshold: 3
 
         volumeMounts:
+        # Mounted as template; startup script injects VTS_ADMIN_PASSWORD from Secret into /opt/OT/OT_VTS/web/configure.json
         - name: config-mount
-          mountPath: /opt/OT/OT_VTS/web/configure.json
+          mountPath: /tmp/configure.json.tmpl
           subPath: configure.json
         - name: nginx-mount
           mountPath: /etc/nginx/nginx.conf
@@ -450,25 +457,23 @@ flowchart TD
     subgraph Region1["Primary Azure Region"]
         direction LR
         subgraph Z1["Availability Zone 1 (Fails)"]
-            N1["AKS Node 1 (NotReady)"]
-            P1["Old VTS Pod (Evicted)"]
+            N1["AKS Node 1 (NotReady)"] --- P1["Old VTS Pod (Evicted)"]
         end
         subgraph Z2["Availability Zone 2 (Healthy)"]
-            N2["AKS Node 2 (Ready)"]
-            P2["New VTS Pod (Scheduled)"]
+            N2["AKS Node 2 (Ready)"] --- P2["New VTS Pod (Scheduled)"]
         end
         ZRS["Single ZRS Managed Disk\n(Synchronously replicated across Zones 1, 2, 3)"]
-        ZRS -.->|Detached from Zone 1| P1
-        ZRS ==>|Reattached in Zone 2 (RPO = 0)| P2
+        ZRS -.->|"Detached from Zone 1"| P1
+        ZRS ==>|"Reattached in Zone 2 (RPO = 0)"| P2
     end
 
     subgraph Region2["Secondary / DR Region"]
-        BackupVault["Geo-Redundant Backup Vault (GRS)\n(Scheduled Snapshots via Azure Backup / Velero)"]
+        BackupVault["Geo-Redundant Backup Vault (GRS)\n(Azure Backup / Velero)"]
         DR_AKS["DR AKS Cluster + Restored PVC"]
-        BackupVault -->|DR Restore| DR_AKS
+        BackupVault -->|"DR Restore"| DR_AKS
     end
 
-    ZRS -.->|Scheduled Async Snapshot| BackupVault
+    ZRS -.->|"Scheduled Async Snapshot"| BackupVault
 ```
 
 ### Key Architectural Rules:

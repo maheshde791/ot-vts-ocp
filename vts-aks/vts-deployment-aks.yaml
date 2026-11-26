@@ -51,6 +51,11 @@ spec:
             secretKeyRef:
               name: vts-app1-credentials
               key: admin_password
+        - name: VTS_READONLY_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: vts-app1-credentials
+              key: readonly_password
 
         resources:
           requests:
@@ -64,6 +69,18 @@ spec:
         args:
         - |
           export GIN_MODE=release
+
+          # 0. Render configure.json from ConfigMap template, injecting both role passwords from Kubernetes Secret
+          /opt/OT/OT_VTS/web/node -e '
+          const fs = require("fs");
+          const adminPwd = process.env.VTS_ADMIN_PASSWORD || "";
+          const readonlyPwd = process.env.VTS_READONLY_PASSWORD || "";
+          if (!adminPwd || !readonlyPwd) { console.error("Missing VTS Secret passwords"); process.exit(1); }
+          const rendered = fs.readFileSync("/tmp/configure.json.tmpl", "utf8")
+            .replace("__VTS_ADMIN_PASSWORD__", adminPwd)
+            .replace("__VTS_READONLY_PASSWORD__", readonlyPwd);
+          fs.writeFileSync("/opt/OT/OT_VTS/web/configure.json", rendered, { mode: 0o600 });
+          '
 
           # 1. Non-destructive repair, validation, and persistence of instances.json
           DATA_FILE="/var/lib/OT/OT_VTS/db/data/instances.json"
@@ -165,7 +182,7 @@ spec:
           failureThreshold: 3
         volumeMounts:
         - name: config-mount
-          mountPath: /opt/OT/OT_VTS/web/configure.json
+          mountPath: /tmp/configure.json.tmpl
           subPath: configure.json
         - name: nginx-mount
           mountPath: /etc/nginx/nginx.conf
