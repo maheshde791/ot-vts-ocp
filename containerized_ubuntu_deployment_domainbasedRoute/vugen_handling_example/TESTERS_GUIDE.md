@@ -22,7 +22,7 @@ This guide is designed for **Performance Test Engineers**, **VuGen Scripters**, 
 
 ## 2. Two Implementation Approaches in Domain-Based Routing
 
-In Domain-Based Multi-Tenancy, you have two distinct options to integrate your VuGen scripts:
+In Domain-Based Multi-Tenancy, two options are available for VuGen script integration:
 
 ```mermaid
 flowchart TD
@@ -64,7 +64,7 @@ This is the **primary recommended standard** because it uses 100% native vendor 
 4. Click **Save** / **OK**.
 
 ### Step 2: Write Native C Code
-In your script (`vuser_init.c` or [`single_script_option1_native_connect_ex.c`](file:///home/mahesh/vts_ocp/containerized_ubuntu_deployment_domainbasedRoute/vugen_handling_example/single_script_option1_native_connect_ex.c)):
+In the script (`vuser_init.c` or [`single_script_option1_native_connect_ex.c`](file:///home/mahesh/vts_ocp/containerized_ubuntu_deployment_domainbasedRoute/vugen_handling_example/single_script_option1_native_connect_ex.c)):
 
 ```c
 #include "lrun.h"
@@ -141,7 +141,7 @@ Vuser Terminated.
 This fallback option is provided strictly for **legacy LoadRunner versions** that lack `lrvtc_connect_ex` or environments where test operators cannot modify VuGen Runtime Settings.
 
 ### How Option 2 Works:
-1. Copy [`vts_lrvtc.h`](file:///home/mahesh/vts_ocp/containerized_ubuntu_deployment_domainbasedRoute/vugen_handling_example/vts_lrvtc.h) into your VuGen script folder.
+1. Copy [`vts_lrvtc.h`](file:///home/mahesh/vts_ocp/containerized_ubuntu_deployment_domainbasedRoute/vugen_handling_example/vts_lrvtc.h) into the VuGen script folder.
 2. In `globals.h` or `vuser_init.c`, include the header:
    ```c
    #include "vts_lrvtc.h"
@@ -172,12 +172,12 @@ See [`single_script_option2_wrapper_header.c`](file:///home/mahesh/vts_ocp/conta
 ## 6. One-Time Client Setup (Windows Testing Machine)
 
 ### Step 1: Configure Hosts File
-Ensure your testing workstation resolves the team domains:
+Ensure the testing workstation resolves the team domains:
 * **On Windows (`C:\Windows\System32\drivers\etc\hosts` as Administrator):**
   ```text
   127.0.0.1 vts-app1.apps-crc.testing vts-app2.apps-crc.testing
   ```
-*(Replace `127.0.0.1` with your actual OpenShift Ingress Router IP in distributed environments).*
+*(Replace `127.0.0.1` with the actual OpenShift Ingress Router IP in distributed environments).*
 
 ### Step 2: Verify in Web Browser
 Open Microsoft Edge or Chrome and verify connectivity:
