@@ -1,0 +1,41 @@
+# 1. Istio Gateway: Configures listener on platform Istio Ingress Controller on Port 443
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: vts-app1-gateway
+  namespace: lre-vts
+spec:
+  selector:
+    # Matches the platform-managed Istio Ingress Gateway pod label
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 443
+      name: https
+      protocol: HTTPS
+    tls:
+      mode: SIMPLE
+      credentialName: vts-app1-enterprise-tls-cert # Secret containing corporate CA cert
+    hosts:
+    - "vts-app1.internal.cloud.corp"
+---
+# 2. Istio VirtualService: Routes traffic to the backend VTS Service
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: vts-app1-virtualservice
+  namespace: lre-vts
+spec:
+  hosts:
+  - "vts-app1.internal.cloud.corp"
+  gateways:
+  - vts-app1-gateway
+  http:
+  - match:
+    - uri:
+        prefix: /
+    route:
+    - destination:
+        host: vts-app1-team-service.lre-vts.svc.cluster.local
+        port:
+          number: 443 # Routes to in-container NGINX reverse-proxy

@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vts-app1-data-pvc
+  namespace: lre-vts
+  labels:
+    app: vts-app1-team
+spec:
+  accessModes:
+    - ReadWriteOnce
+  # Single-zone Standard SSD (validated on AKS).
+  # Note: When Multi-AZ ZRS storage is enabled by the Cloud Platform Team,
+  # switch this to the approved ZRS StorageClass (e.g., managed-csi-zrs) for fresh PVCs.
+  storageClassName: managed-csi
+  resources:
+    requests:
+      storage: 30Gi

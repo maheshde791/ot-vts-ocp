@@ -1,0 +1,6 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lre-vts
+  labels:
+    app.kubernetes.io/part-of: opentext-vts
