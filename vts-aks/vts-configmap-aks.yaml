@@ -6,8 +6,9 @@ metadata:
   labels:
     app: vts-app1-team
 data:
-  # 1. OpenText VTS 26.1 Configuration (App1 Team)
-  # Note: Credentials should be injected/rotated via Kubernetes Secret or Key Vault CSI.
+  # 1. OpenText VTS 26.1 Configuration Template (App1 Team)
+  # Passwords are NOT stored here: __VTS_ADMIN_PASSWORD__ is injected at container startup
+  # from Kubernetes Secret 'vts-app1-credentials' (VTS_ADMIN_PASSWORD env var).
   configure.json: |
     {
       "dbPath": "/var/lib/OT/OT_VTS/db/data",
@@ -25,7 +26,7 @@ data:
         "users": [
           {
             "user": "vtsadmin",
-            "password": "*****",
+            "password": "__VTS_ADMIN_PASSWORD__",
             "display": "VTS Administrator"
           }
         ],
