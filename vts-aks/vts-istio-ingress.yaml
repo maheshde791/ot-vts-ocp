@@ -15,7 +15,9 @@ spec:
       protocol: HTTPS
     tls:
       mode: SIMPLE
-      credentialName: vts-app1-enterprise-tls-cert # Secret containing corporate CA cert
+      # Enterprise PKI / CA-signed TLS Secret (replaces sandbox self-signed cert).
+      # X.509 PEM cert (RSA-2048/4096 or ECDSA P-256) enforcing TLS 1.2/1.3 with AES-256-GCM / AES-128-GCM.
+      credentialName: vts-app1-enterprise-tls-cert
     hosts:
     - "vts-app1.internal.cloud.corp"
 ---

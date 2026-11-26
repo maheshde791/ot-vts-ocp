@@ -191,6 +191,8 @@ spec:
       - name: vts-db-storage
         persistentVolumeClaim:
           claimName: vts-app1-data-pvc
+      # Enterprise PKI / CA-signed TLS Secret (replaces sandbox self-signed cert).
+      # Provisioned from Enterprise PKI / Azure Key Vault (X.509 PEM, RSA-2048/4096 or ECDSA P-256; AES-256-GCM / AES-128-GCM).
       - name: enterprise-tls
         secret:
           secretName: vts-app1-tls-cert

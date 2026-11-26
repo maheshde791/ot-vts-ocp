@@ -499,3 +499,27 @@ All core workload mechanics were validated live on **Azure AKS (`v1.36.5`, `Stan
 - **Persistence:** Deleted and recreated the running VTS pod; verified `managed-csi` Azure Disk reattached and preserved both VTS table data and the `2000` port instance in `instances.json`.
 - **Repro Script:** Complete standalone commands for spinning up and validating in a fresh AKS sandbox are saved in [`kodekloud_aks_repro_commands.txt`](kodekloud_aks_repro_commands.txt).
 
+---
+
+## 11. TLS Certificates & AES Encryption Standard
+
+| Environment | Certificate Source | How It Is Provided |
+| :--- | :--- | :--- |
+| **Sandbox (`kodekloud_aks_repro_commands.txt`)** | Self-signed (`openssl`) | Container startup script generates `/opt/OT/OT_VTS/web/vts.crt` and `vts.key` on boot (`/CN=vts-app1.aks.test`). |
+| **Enterprise AKS (Production)** | **Enterprise PKI / Corporate CA** | **Remove** `openssl` self-signed generation. Issue CA-signed certificate for the corporate FQDN and sync via Azure Key Vault / `cert-manager` into Kubernetes TLS Secrets. |
+
+### Recommended Certificate & Encryption Profile
+- **Certificate Format & Type:** `kubernetes.io/tls` Secret (`X.509` PEM `tls.crt` and `tls.key`, **RSA-2048/4096** or **ECDSA P-256**).
+- **TLS Protocols:** **TLS 1.2** and **TLS 1.3** only (TLS 1.0/1.1 disabled).
+- **AES Encryption Ciphers:** **AES-256-GCM** and **AES-128-GCM** (`ECDHE-ECDSA-AES256-GCM-SHA384`, `ECDHE-RSA-AES256-GCM-SHA384`, `ECDHE-ECDSA-AES128-GCM-SHA256`, `ECDHE-RSA-AES128-GCM-SHA256`).
+- **Two Placement Points:**
+  1. **Istio Ingress Gateway (`vts-istio-ingress.yaml`):** `credentialName: vts-app1-enterprise-tls-cert` (external TLS facing Load Generators & browsers).
+  2. **Backend VTS NGINX (`vts-deployment-aks.yaml` & `vts-configmap-aks.yaml`):** Mounted read-only from `vts-app1-tls-cert` at `/opt/OT/OT_VTS/web/certs/tls.crt` & `tls.key` (when TLS re-encryption to port `8443` is enabled).
+
+```bash
+# Example: Create Kubernetes TLS Secret from Enterprise CA-signed cert & key
+kubectl create secret tls vts-app1-tls-cert -n lre-vts \
+  --cert=vts-app1.crt \
+  --key=vts-app1.key
+```
+
