@@ -28,13 +28,20 @@ data:
             "user": "vtsadmin",
             "password": "__VTS_ADMIN_PASSWORD__",
             "display": "VTS Administrator"
+          },
+          {
+            "user": "tester",
+            "password": "__VTS_READONLY_PASSWORD__",
+            "display": "Test Operator (Read-Only)"
           }
         ],
         "role": {
           "administrator": [
             "vtsadmin"
           ],
-          "user": []
+          "user": [
+            "tester"
+          ]
         },
         "requireBasicAuthForAPI": true,
         "useSSL": false

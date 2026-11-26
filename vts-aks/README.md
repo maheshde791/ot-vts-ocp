@@ -169,10 +169,12 @@ metadata:
   namespace: lre-vts
 type: Opaque
 stringData:
+  # Administrator role: full VTS UI & instance management
   admin_user: "vtsadmin"
   admin_password: "*****"
-  api_user: "vtsadmin"
-  api_password: "*****"
+  # User role (read-only / test operator)
+  readonly_user: "tester"
+  readonly_password: "*****"
 ```
 
 ### 5.3 Istio Ingress Gateway Routing (`vts-istio-ingress.yaml`)
@@ -281,6 +283,11 @@ spec:
             secretKeyRef:
               name: vts-app1-credentials
               key: admin_password
+        - name: VTS_READONLY_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: vts-app1-credentials
+              key: readonly_password
 
         resources:
           requests:
