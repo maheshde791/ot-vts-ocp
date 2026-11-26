@@ -126,15 +126,15 @@ All Kubernetes resources are split into clean, component-wise YAML files in this
 
 ### Apply Order & Component Inventory
 
-| Order | File | Resource | Key AKS / Enterprise Notes |
-| :---: | :--- | :--- | :--- |
-| **1** | `vts-namespace-aks.yaml` | `Namespace` | Creates `lre-vts` (omit if Cloud Platform Team pre-provisions namespace). |
-| **2** | `vts-pvc-aks.yaml` | `PersistentVolumeClaim` | Uses `managed-csi` (switch to approved ZRS StorageClass once Multi-AZ ZRS is available). |
-| **3** | `vts-secret-aks.yaml` | `Secret` | Stores VTS credentials outside ConfigMaps (or sync from Key Vault CSI). |
-| **4** | `vts-configmap-aks.yaml` | `ConfigMap` | `configure.json` + CVE-remediated `vts-nginx.conf` (`listen 8443 ssl;`). |
-| **5** | `vts-deployment-aks.yaml` | `Deployment` | Hardened `securityContext` (`UID/GID 54345`, `runAsNonRoot: true`, `drop: [ALL]`) + `tcpSocket` probes. |
-| **6** | `vts-service-aks.yaml` | `Service` | `ClusterIP` mapping port `443` → container port `8443`. |
-| **7** | `vts-istio-ingress.yaml` | `Gateway` + `VirtualService` | Istio Ingress routing on port `443` with corporate TLS secret. |
+| Order | App1 File | App2 File | Resource | Key AKS / Enterprise Notes |
+| :---: | :--- | :--- | :--- | :--- |
+| **1** | `vts-namespace-aks.yaml` | *(shared `lre-vts`)* | `Namespace` | Creates `lre-vts` (omit if Cloud Platform Team pre-provisions namespace). |
+| **2** | `vts-pvc-aks.yaml` | `vts-app2-pvc-aks.yaml` | `PersistentVolumeClaim` | Uses `managed-csi` (switch to approved ZRS StorageClass once Multi-AZ ZRS is available). |
+| **3** | `vts-secret-aks.yaml` | `vts-app2-secret-aks.yaml` | `Secret` | Stores VTS `vtsadmin` & `tester` credentials outside ConfigMaps (or sync from Key Vault CSI). |
+| **4** | `vts-configmap-aks.yaml` | `vts-app2-configmap-aks.yaml` | `ConfigMap` | `configure.json` template + CVE-remediated `vts-nginx.conf` (`listen 8443 ssl;`). |
+| **5** | `vts-deployment-aks.yaml` | `vts-app2-deployment-aks.yaml` | `Deployment` | Hardened `securityContext` (`UID/GID 54345`, `runAsNonRoot: true`, `drop: [ALL]`) + `tcpSocket` probes. |
+| **6** | `vts-service-aks.yaml` | `vts-app2-service-aks.yaml` | `Service` | `ClusterIP` mapping port `443` → container port `8443`. |
+| **7** | `vts-istio-ingress.yaml` | `vts-app2-istio-ingress.yaml` | `Gateway` + `VirtualService` | Istio Ingress routing on port `443` with corporate TLS secret (`vts-app1.*` / `vts-app2.*`). |
 
 > [!NOTE]
 > **Live AKS (`v1.36.5`) Validation Findings:**
