@@ -4,11 +4,11 @@ This reference manual is tailored for performance test leads, application owners
 
 ---
 
-## 1. Executive Grounding: What Your Proof of Concept Proved
+## 1. Executive Summary: POC Validation
 
 > [!IMPORTANT]
 > **OpenShift is Kubernetes. AKS is Kubernetes.**
-> Over the course of testing on OpenShift Local (CRC), your POC successfully validated the foundational architecture:
+> Over the course of testing on OpenShift Local (CRC), the POC successfully validated the foundational architecture:
 > - **Workload Isolation:** Two independent single-instance VTS workloads (`vts-app1-team` and `vts-app2-team`), each with its own pod, configuration, and dedicated persistent storage.
 > - **Stateful Persistence:** `Recreate` deployment strategy with 1 replica and dedicated RWO persistent volume claims (`/var/lib/OT/OT_VTS/db/data`) preventing multi-attach corruption.
 > - **In-Container Reverse Proxy & SSRF Protection:** In-container NGINX listening on port `8443`, proxying admin UI (port 4000) and dynamically routing instance API requests (`?portnumber=2000..2050`) while blocking direct external access to raw database sockets.
@@ -57,8 +57,8 @@ flowchart TD
 | :--- | :--- | :--- |
 | **Cloud Intake Portal** | The internal enterprise intake portal where teams initiate cloud hosting requests, budget reviews, and architecture reviews. | Initiates the onboarding assessment to determine hosting model and cloud costs. |
 | **ELZ (Enterprise Landing Zone)** | A pre-architected, security-hardened Azure subscription foundation enforcing corporate guardrails, network routing, firewalls, and compliance policies. | VTS will deploy inside this landing zone; direct public internet ingress is blocked; all traffic routes via corporate ExpressRoute. |
-| **Cloud Platform Team** | The central platform engineering group managing cloud operations, landing zones, and foundational infrastructure. | They review your Cloud Intake request and determine whether you receive a shared namespace or a dedicated cluster. |
-| **Tier 1 / Tier 2 vs. Tier 3** | **Tier 1 & 2:** Core infrastructure (networking, subscriptions, IAM, platform policies). Owned by Cloud Platform Team.<br>**Tier 3:** Application workloads (Pods, Namespaces, Storage claims). Owned by application/DevOps teams. | You own the VTS application layer (Tier 3). You never have to build enterprise networks or configure ExpressRoute firewalls. |
+| **Cloud Platform Team** | The central platform engineering group managing cloud operations, landing zones, and foundational infrastructure. | Reviews the Cloud Intake request and determines whether VTS is onboarded to a shared namespace or a dedicated cluster. |
+| **Tier 1 / Tier 2 vs. Tier 3** | **Tier 1 & 2:** Core infrastructure (networking, subscriptions, IAM, platform policies). Owned by Cloud Platform Team.<br>**Tier 3:** Application workloads (Pods, Namespaces, Storage claims). Owned by application/DevOps teams. | The application team owns the VTS layer (Tier 3) without managing enterprise networks or ExpressRoute firewalls. |
 | **Istio Ingress Gateway** | Enterprise service mesh ingress controller managing inbound HTTPS traffic, TLS termination, and L7 virtual routing. | Replaces the OpenShift `Route`. Ingress traffic is managed via Istio `Gateway` and `VirtualService` CRDs. |
 | **Entra ID (Azure AD)** | Microsoft’s identity management platform. | Controls RBAC access for developers, pipeline service principals, and admin console access. |
 | **Enterprise Artifactory / ACR** | Corporate private container registry (`enterprise-docker-release-local`). | The VTS Ubuntu image will be scanned (Xray/Defender) and pinned by immutable sha256 digest. |
@@ -74,14 +74,14 @@ flowchart LR
     subgraph Model1["Model 1: Shared AKS (Namespace Only) - STRONGLY RECOMMENDED"]
         M1_Cluster["Shared AKS Cluster\n(Owned & Maintained by Cloud Platform Team)"]
         M1_NS["Assigned Namespace:\nlre-vts"]
-        M1_VTS["VTS Pods & PVCs\n(Your Team Deploys Here)"]
+        M1_VTS["VTS Pods & PVCs\n(Application Team Deploys Here)"]
         M1_Cluster --> M1_NS --> M1_VTS
     end
 
     subgraph Model2["Model 2: Dedicated AKS (Self-Managed)"]
         M2_TFE["Terraform Enterprise (TFE)\n(Platform-Approved Modules)"]
-        M2_Cluster["Dedicated AKS Cluster\n(Your Team Provisions)"]
-        M2_VTS["VTS Workloads\n(Your Team Manages)"]
+        M2_Cluster["Dedicated AKS Cluster\n(Application Team Provisions)"]
+        M2_VTS["VTS Workloads\n(Application Team Manages)"]
         M2_TFE --> M2_Cluster --> M2_VTS
     end
 
@@ -98,17 +98,17 @@ flowchart LR
 | Dimension | Model 1: Shared AKS (Namespace) | Model 2: Dedicated AKS (Self-Managed) | Model 3: Dedicated AKS (Platform-Managed) |
 | :--- | :--- | :--- | :--- |
 | **Recommendation for VTS** | **Highest (Strongly Recommended)** | Low (Avoid unless forced) | Medium (Only if isolation mandates it) |
-| **What You Receive** | A pre-configured namespace (`lre-vts`) with RBAC access. | An empty Azure resource group + approved Terraform modules. | A ready dedicated cluster operated by a cloud managed service. |
-| **What You Manage** | Only Kubernetes YAMLs (`kubectl apply`) + VTS application. | Terraform code to build cluster + node pool maintenance + VTS YAMLs. | Only Kubernetes YAMLs + VTS application. |
-| **Cloud Skill Required** | **Low** (Exact same as your OpenShift experience). | **Moderate-High** (Requires Terraform + Azure CLI). | **Low-Moderate**. |
-| **Cluster Upgrades** | Handled 100% by central platform team. | Your team must plan and execute node upgrades. | Handled by platform managed service. |
+| **Provisioned Resources** | A pre-configured namespace (`lre-vts`) with RBAC access. | An empty Azure resource group + approved Terraform modules. | A ready dedicated cluster operated by a cloud managed service. |
+| **Team Ownership** | Only Kubernetes YAMLs (`kubectl apply`) + VTS application. | Terraform code to build cluster + node pool maintenance + VTS YAMLs. | Only Kubernetes YAMLs + VTS application. |
+| **Operational Overhead** | **Low** (Same workflow as OpenShift container operations). | **Moderate-High** (Requires Terraform + Azure CLI). | **Low-Moderate**. |
+| **Cluster Upgrades** | Handled 100% by central platform team. | Application team plans and executes node upgrades. | Handled by platform managed service. |
 | **FinOps Cost** | Lowest compute cost (fraction of shared node pool). | High cost (dedicated control plane, minimum 3 VM nodes). | High cost (dedicated VMs + managed operations fee). |
 
 ---
 
 ## 4. 1-to-1 Translation: OpenShift (CRC) to Azure AKS
 
-| Architecture Layer | OpenShift Local (What You Already Built) | Azure Kubernetes Service (AKS Equivalent) | Changes Needed in Manifests |
+| Architecture Layer | OpenShift Local (CRC POC) | Azure Kubernetes Service (AKS Equivalent) | Changes Needed in Manifests |
 | :--- | :--- | :--- | :--- |
 | **CLI Tool** | `oc` | `kubectl` (after running `az aks get-credentials`) | Commands are 100% identical (`kubectl get pods`, `kubectl apply`). |
 | **Routing / Ingress** | OpenShift `Route` (`reencrypt` on port 443) | **Istio Ingress Gateway** (`Gateway` + `VirtualService`) or AGIC | Replace `vts-route.yaml` with Istio `Gateway` and `VirtualService` manifests. |
@@ -344,9 +344,9 @@ spec:
 
 ---
 
-## 6. Actionable 11-Step Production Gap Remediation Roadmap
+## 6. Production Transition Roadmap (11-Step Checklist)
 
-Based on the architectural assessment, here is your exact checklist to transition VTS from POC to production AKS:
+Checklist to transition VTS from the OpenShift POC to production Enterprise AKS:
 
 ```mermaid
 flowchart TD
@@ -378,21 +378,21 @@ flowchart TD
 
 ---
 
-## 7. Accelerated Learning Roadmap (Skip the Noise)
+## 7. AKS & Azure Onboarding Reference
 
-Do **NOT** spend 50 hours watching generic cloud courses. Your OpenShift experience already covers container fundamentals, YAML authoring, and pod debugging.
+Key Azure and AKS operational concepts required beyond standard Kubernetes manifest management:
 
 ```mermaid
 flowchart LR
-    Step1["Step 1 (2h)\nAzure CLI & 'az aks get-credentials'"] --> Step2["Step 2 (2h)\nIstio Gateway & VirtualService"]
-    Step2 --> Step3["Step 3 (1.5h)\nEnterprise Artifactory / ACR Pulls"]
-    Step3 --> Step4["Step 4 (2h)\nAzure Managed Disks (managed-csi)"]
-    Step4 -.->|Only if Dedicated Cluster Mandated| Step5["Step 5 (3h)\nTerraform Enterprise Modules"]
+    Step1["1. Azure CLI &\n'az aks get-credentials'"] --> Step2["2. Istio Gateway &\nVirtualService"]
+    Step2 --> Step3["3. Enterprise Artifactory /\nACR Digest Pulls"]
+    Step3 --> Step4["4. Azure Managed Disks\n(managed-csi / ZRS)"]
+    Step4 -.->|Only if Dedicated Cluster Mandated| Step5["5. Terraform Enterprise\nApproved Modules"]
 ```
 
-### Priority Study Checklist:
+### Operational Reference:
 
-#### Topic 1: Azure CLI & Accessing AKS (2 hours)
+#### 1. Azure CLI & Accessing AKS
 - **Key Commands:**
   ```bash
   az login
@@ -401,29 +401,28 @@ flowchart LR
   kubectl get nodes
   kubectl get pods -n lre-vts
   ```
-- **Takeaway:** Once `az aks get-credentials` is executed, all your daily work is 100% standard `kubectl`!
+- Once `az aks get-credentials` is executed, daily cluster operations use standard `kubectl` commands.
 
-#### Topic 2: Istio Ingress Gateway & VirtualService (2 hours)
-- How the Istio Ingress Gateway terminates TLS on port 443 and forwards traffic to internal Kubernetes Services.
-- How `VirtualService` routes hostnames (`vts-app1.internal.cloud.corp`) and path prefixes.
+#### 2. Istio Ingress Gateway & VirtualService
+- The Istio Ingress Gateway terminates TLS on port 443 and forwards traffic to internal Kubernetes Services.
+- `VirtualService` routes corporate hostnames (`vts-app1.internal.cloud.corp`) and path prefixes to backend Services.
 
-#### Topic 3: Enterprise Image Management & Digest Pinning (1.5 hours)
-- Understanding why enterprise security mandates image digests (`@sha256:...`) instead of floating tags (`:latest`, `:26.1`) to ensure immutability.
+#### 3. Enterprise Image Management & Digest Pinning
+- Enterprise security mandates immutable image digests (`@sha256:...`) instead of floating tags (`:latest`, `:26.1`).
 
-#### Topic 4: Azure Storage Architecture (2 hours)
-- **Azure Managed Disk (`managed-csi`):** Best for single-pod stateful workloads like VTS where high IOPS and low-latency disk writes for Valkey RDB snapshots (`save 60 1`) are critical. Fast and reliable.
+#### 4. Azure Storage Architecture
+- **Azure Managed Disk (`managed-csi` / `managed-csi-zrs`):** Best for single-pod stateful workloads like VTS where high IOPS and low-latency disk writes for Valkey RDB snapshots (`save 60 1`) are critical.
 - **Azure Files (`azurefile-csi`):** Supports `ReadWriteMany` (RWX) if multiple pods ever need shared access.
 
-#### Topic 5: Terraform on Azure (Only if Model 2 is chosen)
-- If your team is handed an empty subscription and asked to provision AKS:
-  - Focus on consuming the **pre-approved corporate Terraform modules** from the platform team.
-  - You do not write Terraform from scratch; you pass input variables (VNet ID, Subnet ID, Cluster Name) to their private module.
+#### 5. Terraform on Azure (Only if Model 2 is chosen)
+- If a dedicated subscription/cluster is provisioned via Terraform Enterprise:
+  - Consume the **pre-approved corporate Terraform modules** from the platform team by passing input variables (VNet ID, Subnet ID, Cluster Name) rather than authoring raw infrastructure modules.
 
 ---
 
-## 8. Strategic Questions to Ask Your Cloud & Architecture Team
+## 8. Key Architecture & Platform Alignment Questions
 
-When you meet with your enterprise architect, cloud lead, or Cloud Platform Team representative, asking these precise questions will establish technical authority and clarify your exact scope immediately:
+Open items to confirm with the Enterprise Architecture and Cloud Platform teams during onboarding:
 
 ### Question 1: Hosting Model & Cluster Ownership
 > *"In the Cloud Intake assessment for VTS, are we being onboarded to an existing shared AKS cluster (Namespace-as-a-Service for VTS), or is architecture mandating a dedicated AKS cluster for VTS due to stateful disk and network isolation requirements?"*
@@ -474,7 +473,7 @@ flowchart TD
 
 ### Key Architectural Rules:
 1. **Node Distribution (1 Node Per Zone):**
-   - For a Dedicated AKS cluster to survive a zone failure, you need **at least 1 node per Availability Zone** (typically **3 nodes across Zones 1, 2, and 3**).
+   - For a Dedicated AKS cluster to survive a zone failure, at least **1 node per Availability Zone** is required (typically **3 nodes across Zones 1, 2, and 3**).
    - On a Shared AKS platform, the Cloud Platform Team already maintains multi-zone node pools across Zones 1, 2, and 3.
 2. **StorageClass (`LRS` vs. `ZRS`):**
    - Standard `managed-csi` (**LRS**) pins the disk to a single Availability Zone. If that zone fails, the pod cannot attach the disk in another zone.

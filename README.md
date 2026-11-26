@@ -250,7 +250,7 @@ sudo chmod 644 /etc/pki/tls/certs/vts.crt
 ```
 
 ### 6.2 Enterprise Certificate Authority (Production Guidelines)
-When submitting a certificate request in your corporate PKI portal:
+When submitting a certificate request in the corporate PKI portal:
 - **Type**: Web Server Certificate (`Server Authentication` - OID `1.3.6.1.5.5.7.3.1`)
 - **Key Algorithm**: RSA 2048-bit or 4096-bit (Unencrypted PEM private key)
 - **Subject Alternative Names (SAN)**: Target FQDN, short hostname, and IP

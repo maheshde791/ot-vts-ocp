@@ -92,12 +92,12 @@ flowchart TD
 ## 4. Step-by-Step Setup Guide
 
 ### Step 1: Configure Hosts File on Testing Workstation
-Ensure your testing machine resolves `vts.apps-crc.testing`:
+Ensure the testing machine resolves `vts.apps-crc.testing`:
 * **On Windows (`C:\Windows\System32\drivers\etc\hosts` as Administrator):**
   ```text
   127.0.0.1 vts.apps-crc.testing
   ```
-*(Replace `127.0.0.1` with your actual OpenShift Ingress Router IP in distributed environments).*
+*(Replace `127.0.0.1` with the actual OpenShift Ingress Router IP in distributed environments).*
 
 ---
 
@@ -112,8 +112,8 @@ https://vts.apps-crc.testing/app1-team/
 
 ---
 
-### Step 3: Add `vts_lrvtc.h` to Your Script
-1. Copy [`vts_lrvtc.h`](file:///home/mahesh/vts_ocp/containerized_ubuntu_deployment_pathbasedRoute/vugen_handling_example/vts_lrvtc.h) into the root folder of your VuGen script (alongside `default.cfg` and `globals.h`).
+### Step 3: Add `vts_lrvtc.h` to the Script
+1. Copy [`vts_lrvtc.h`](file:///home/mahesh/vts_ocp/containerized_ubuntu_deployment_pathbasedRoute/vugen_handling_example/vts_lrvtc.h) into the root folder of the VuGen script (alongside `default.cfg` and `globals.h`).
 2. In `globals.h`, add:
    ```c
    #include "vts_lrvtc.h"
